@@ -4,10 +4,13 @@ Standard CyTOF analysis package - Phase 1: Ingestion and storage.
 
 ## Installation
 
+```bash
 pip install anndata zarr numpy pandas pyyaml fcsparser
+```
 
 ## Quick Start
 
+```python
 from cytofstandard import Project
 
 # Create a new project
@@ -55,6 +58,7 @@ run.unlock_zarr_parts(parts=["layers/raw", "obs"])
 # Lock/unlock the full Zarr store
 run.lock_zarr_parts()
 run.unlock_zarr_parts()
+```
 
 ## Normalization (cytof_transform)
 
