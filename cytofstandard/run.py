@@ -1291,6 +1291,261 @@ class Run:
 
         return metadata
 
+    @staticmethod
+    def _knn_to_jaccard_graph_arrays(
+        knn_idx: np.ndarray,
+        n_nodes: int,
+        min_jaccard: float = 0.0,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Build Jaccard-weighted undirected graph arrays from KNN indices.
+
+        For each directed KNN edge (i -> j), computes the Jaccard similarity
+        between the neighbor sets of i and j.  Self-loops are excluded.
+        The result is symmetrized by taking the max Jaccard for each pair.
+
+        Args:
+            knn_idx: (n_nodes, k) integer array of neighbor indices.
+            n_nodes: Total number of nodes.
+            min_jaccard: Edges with Jaccard < this value are dropped.
+
+        Returns:
+            (rows, cols, jaccard_weights) — upper-triangular undirected edges.
+        """
+        knn_idx = np.asarray(knn_idx, dtype=np.int32)
+        k = knn_idx.shape[1]
+
+        # Build neighbor sets as frozensets (excluding self).
+        neighbor_sets = []
+        for i in range(n_nodes):
+            nbrs = set(int(x) for x in knn_idx[i] if int(x) != i)
+            neighbor_sets.append(nbrs)
+
+        # Iterate over all directed edges once; accumulate Jaccard per
+        # undirected pair using a dict keyed by (lo, hi).
+        jaccard_dict: dict[tuple[int, int], float] = {}
+        for i in range(n_nodes):
+            for j_raw in knn_idx[i]:
+                j = int(j_raw)
+                if j == i:
+                    continue
+                lo, hi = (i, j) if i < j else (j, i)
+                if (lo, hi) in jaccard_dict:
+                    continue  # already computed
+                si = neighbor_sets[i] | {i}
+                sj = neighbor_sets[j] | {j}
+                inter = len(si & sj)
+                union = len(si | sj)
+                jac = inter / union if union > 0 else 0.0
+                if jac >= min_jaccard:
+                    jaccard_dict[(lo, hi)] = jac
+
+        if not jaccard_dict:
+            empty = np.empty(0, dtype=np.int32)
+            return empty, empty, np.empty(0, dtype=np.float32)
+
+        pairs = list(jaccard_dict.keys())
+        rows = np.array([p[0] for p in pairs], dtype=np.int32)
+        cols = np.array([p[1] for p in pairs], dtype=np.int32)
+        weights = np.array([jaccard_dict[p] for p in pairs], dtype=np.float32)
+        return rows, cols, weights
+
+    def cluster_leiden_jaccard(
+        self,
+        embedding_name: str,
+        cluster_key: str | None = None,
+        jaccard_connectivities_key: str | None = None,
+        min_jaccard: float = 0.0,
+        resolution: float = 1.0,
+        n_iterations: int = 2,
+        beta: float = 0.01,
+        objective_function: str = "modularity",
+        seed: int = 42,
+        verbose: bool = False,
+        inplace: bool = True,
+    ) -> dict[str, Any]:
+        """Cluster cells using a PhenoGraph-style Jaccard graph with Leiden.
+
+        Equivalent to PhenoGraph but uses Leiden instead of Louvain:
+            1. KNN graph (pre-computed by `compute_umap`)
+            2. Edge weights replaced by Jaccard similarity of neighbor sets
+            3. Leiden community detection on the Jaccard-weighted graph
+
+        The KNN indices are read from the `obsm` artifacts stored by
+        `compute_umap`.  No recomputation of neighbors is performed.
+
+        Args:
+            embedding_name: Name of the embedding whose KNN artifacts to use
+                (must have been computed via `compute_umap`).
+            cluster_key: Key under which cluster labels are stored in
+                `adata.obs`. Defaults to
+                `f"{embedding_name}_jaccard_leiden"`.
+            jaccard_connectivities_key: Key used to store the Jaccard
+                connectivity matrix in `adata.obsp`. Defaults to
+                `f"{embedding_name}_jaccard_connectivities"`.
+            min_jaccard: Edges with Jaccard similarity below this threshold
+                are pruned before clustering.  Useful to remove very weak
+                connections (default 0.0 keeps all edges).
+            resolution: Leiden resolution parameter.
+            n_iterations: Number of Leiden iterations.
+            beta: Leiden randomness parameter.
+            objective_function: `"modularity"` or `"CPM"`.
+            seed: Random seed passed to Leiden.
+            verbose: If True, print progress to stdout.
+            inplace: If True, persist updated AnnData to Zarr after
+                clustering.
+
+        Returns:
+            Metadata dict stored under `adata.uns["clusterings"][cluster_key]`.
+        """
+        import time as _time
+
+        adata = self.read_adata()
+        embeddings_uns = self._upsert_nested_uns_dict(adata, "embeddings")
+
+        if embedding_name not in embeddings_uns or not isinstance(
+            embeddings_uns[embedding_name], dict
+        ):
+            raise ValueError(
+                f"Embedding '{embedding_name}' not found in uns. "
+                "Run compute_umap first."
+            )
+        embed_meta = embeddings_uns[embedding_name]
+
+        knn_indices_key = embed_meta.get(
+            "knn_indices_key", f"{embedding_name}_knn_indices"
+        )
+        if knn_indices_key not in adata.obsm:
+            raise ValueError(
+                f"KNN indices '{knn_indices_key}' not found in adata.obsm. "
+                "Re-run compute_umap to regenerate KNN artifacts."
+            )
+
+        cluster_key = cluster_key or f"{embedding_name}_jaccard_leiden"
+        jaccard_connectivities_key = (
+            jaccard_connectivities_key
+            or f"{embedding_name}_jaccard_connectivities"
+        )
+
+        try:
+            import igraph as ig
+        except ImportError as exc:
+            raise ImportError(
+                "cluster_leiden_jaccard requires python-igraph. "
+                "Install with: pip install igraph"
+            ) from exc
+
+        try:
+            from scipy import sparse as sp
+        except ImportError as exc:
+            raise ImportError(
+                "cluster_leiden_jaccard requires scipy. "
+                "Install with: pip install scipy"
+            ) from exc
+
+        knn_idx = np.asarray(adata.obsm[knn_indices_key], dtype=np.int32)
+        n_nodes = adata.n_obs
+
+        if verbose:
+            print(
+                f"[cluster_leiden_jaccard] embedding='{embedding_name}' "
+                f"n_cells={n_nodes} k={knn_idx.shape[1]} "
+                f"min_jaccard={min_jaccard}"
+            )
+
+        t_jac = _time.perf_counter()
+        rows, cols, weights = self._knn_to_jaccard_graph_arrays(
+            knn_idx, n_nodes, min_jaccard=min_jaccard
+        )
+        jac_sec = float(_time.perf_counter() - t_jac)
+
+        if verbose:
+            print(
+                f"[cluster_leiden_jaccard] jaccard edges={len(rows)} "
+                f"jac_sec={jac_sec:.3f}"
+            )
+
+        # Symmetrize into sparse matrix.
+        edge_u = np.concatenate([rows, cols])
+        edge_v = np.concatenate([cols, rows])
+        sym_w = np.concatenate([weights, weights]).astype(np.float32)
+        jaccard_conn = sp.csr_matrix(
+            (sym_w, (edge_u, edge_v)),
+            shape=(n_nodes, n_nodes),
+            dtype=np.float32,
+        )
+        adata.obsp[jaccard_connectivities_key] = jaccard_conn
+
+        # Build igraph from upper-triangular edges.
+        edges = list(zip(rows.tolist(), cols.tolist()))
+        graph = ig.Graph(n=n_nodes, edges=edges, directed=False)
+        graph.es["weight"] = weights.tolist()
+
+        if verbose:
+            print(
+                f"[cluster_leiden_jaccard] running Leiden "
+                f"resolution={resolution} n_iterations={n_iterations}"
+            )
+
+        t_leiden = _time.perf_counter()
+        part = graph.community_leiden(
+            objective_function=objective_function,
+            weights="weight",
+            resolution=resolution,
+            n_iterations=n_iterations,
+            beta=beta,
+        )
+        leiden_sec = float(_time.perf_counter() - t_leiden)
+
+        labels = np.asarray(part.membership, dtype=np.int32)
+        adata.obs[cluster_key] = pd.Categorical(labels.astype(str))
+
+        n_clusters = int(len(set(labels.tolist())))
+        clusterings_uns = self._upsert_nested_uns_dict(adata, "clusterings")
+        metadata = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "method": "jaccard_leiden",
+            "embedding_name": embedding_name,
+            "knn_indices_key": knn_indices_key,
+            "jaccard_connectivities_key": jaccard_connectivities_key,
+            "cluster_key": cluster_key,
+            "min_jaccard": float(min_jaccard),
+            "resolution": float(resolution),
+            "n_iterations": int(n_iterations),
+            "beta": float(beta),
+            "objective_function": str(objective_function),
+            "seed": int(seed),
+            "verbose": bool(verbose),
+            "n_cells": int(n_nodes),
+            "n_clusters": n_clusters,
+            "jac_sec": jac_sec,
+            "leiden_sec": leiden_sec,
+        }
+        clusterings_uns[cluster_key] = metadata
+
+        if verbose:
+            print(
+                f"[cluster_leiden_jaccard] done cluster_key='{cluster_key}' "
+                f"n_clusters={n_clusters} leiden_sec={leiden_sec:.3f}"
+            )
+
+        self._adata = adata
+        self._log_run_event(
+            "leiden_jaccard_clustered",
+            {
+                "embedding_name": embedding_name,
+                "cluster_key": cluster_key,
+                "min_jaccard": float(min_jaccard),
+                "resolution": float(resolution),
+                "n_iterations": int(n_iterations),
+                "n_clusters": int(n_clusters),
+                "n_cells": int(n_nodes),
+            },
+        )
+        if inplace:
+            self.save()
+
+        return metadata
+
     def _resolve_permcell_module(
         self,
         permcell_module: Any | None = None,
