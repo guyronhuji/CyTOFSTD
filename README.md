@@ -199,9 +199,11 @@ run.plot_boxplot(
     field="H3K27me3",
     groupby="condition",
     layer="normalized",
+    comparisons="all",    # None=no brackets, "all", "adjacent", or pair list
     test="mannwhitney",   # 'mannwhitney' | 'ttest' | 'welch'
     multitest="holm",     # None | 'holm' | 'bonferroni'
     show_points=True,     # overlay subsampled stripplot
+    show_outliers=False,  # hide boxplot fliers
     boxplot_kwargs={"width": 0.5, "notch": True},
     stripplot_kwargs={"jitter": 0.15},
 )
@@ -212,6 +214,19 @@ run.plot_boxplot(
     groupby="leiden_cluster",
     test="welch",
     comparisons=[("0", "1"), ("0", "2")],   # only test selected pairs
+)
+
+# Customize significance star thresholds (strictest first)
+run.plot_boxplot(
+    field="H3K27me3",
+    groupby="condition",
+    comparisons="all",
+    significance_thresholds=[
+        (1e-3, "***"),
+        (1e-2, "**"),
+        (0.05, "*"),
+    ],
+    ns_label="ns",
 )
 ```
 

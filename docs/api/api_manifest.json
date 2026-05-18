@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-18T17:03:25.126987+00:00",
+  "generated_at": "2026-05-18T17:09:42.407131+00:00",
   "generator": "scripts/generate_api_docs.py",
   "package": "cytofstandard",
   "module_count": 13,
@@ -437,7 +437,7 @@
             },
             {
               "name": "plot_boxplot",
-              "signature": "(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'holm', show_points: bool = False, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)",
+              "signature": "(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'holm', show_points: bool = False, show_outliers: bool = True, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', significance_thresholds: list[tuple[float, str]] | None = None, random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)",
               "summary": "Boxplot for a single field grouped by an obs column, with significance brackets.",
               "decorators": []
             },

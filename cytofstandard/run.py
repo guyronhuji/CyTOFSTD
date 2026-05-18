@@ -2017,6 +2017,7 @@ class Run:
         test: str = "mannwhitney",
         multitest: str | None = "holm",
         show_points: bool = False,
+        show_outliers: bool = True,
         max_points: int = 2000,
         point_alpha: float = 0.4,
         point_size: float = 2.0,
@@ -2027,6 +2028,7 @@ class Run:
         bracket_linewidth: float = 1.0,
         bracket_fontsize: float = 11.0,
         ns_label: str = "ns",
+        significance_thresholds: list[tuple[float, str]] | None = None,
         random_state: int = 0,
         boxplot_kwargs: dict | None = None,
         stripplot_kwargs: dict | None = None,
@@ -2043,27 +2045,41 @@ class Run:
             layer: Layer used when `field` is a marker (default `X`).
             order: Optional explicit group order along the x-axis.
             comparisons: Pairs to test. Accepts:
-                - `None` or `"all"`: all unordered pairs.
+                - `None` (default): no significance brackets are drawn.
+                - `"all"`: all unordered pairs.
                 - `"adjacent"`: only neighbours in `order`.
                 - List of `(group_a, group_b)` tuples for explicit pairs.
             test: `"mannwhitney"` (default), `"ttest"`, or `"welch"`.
             multitest: `None`, `"holm"`, or `"bonferroni"`.
             show_points: Overlay a stripplot of per-cell points (subsampled).
+            show_outliers: Whether to render boxplot outlier markers
+                (maps to seaborn's `showfliers`). Defaults to True. Set to
+                False to clean up dense plots (or pass `"showfliers": False`
+                via `boxplot_kwargs`, which takes precedence).
             max_points: Maximum number of stripplot points (subsampled).
             point_alpha: Alpha for overlaid points.
             point_size: Size for overlaid points.
-            palette: Seaborn palette name or color list for the boxes.
+            palette: Seaborn palette name, color list, or dict. When None,
+                a distinct color per group is generated automatically using
+                the `"tab10"` palette.
             figsize: Optional figure size.
             ax: Optional matplotlib axes to draw into.
             bracket_color: Color used for significance brackets.
             bracket_linewidth: Line width used for significance brackets.
             bracket_fontsize: Font size used for significance labels.
             ns_label: Label used for non-significant comparisons.
+            significance_thresholds: Ordered list of `(p_threshold, label)`
+                tuples used to convert each (adjusted) p-value into a star
+                label. The first tuple whose `p_threshold` is `>= p` wins.
+                Provide thresholds from strictest to loosest, for example
+                `[(1e-4, "****"), (1e-3, "***"), (1e-2, "**"), (5e-2, "*")]`
+                (the default). Any p-value larger than every threshold is
+                labelled with `ns_label`.
             random_state: Seed used when subsampling points.
             boxplot_kwargs: Extra keyword arguments forwarded to
                 `seaborn.boxplot` (e.g. `width`, `linewidth`, `notch`,
-                `whis`, `saturation`). Explicit arguments above take
-                precedence over keys in this dict.
+                `whis`, `saturation`, `showfliers`). Keys here override the
+                explicit arguments above.
             stripplot_kwargs: Extra keyword arguments forwarded to
                 `seaborn.stripplot` when `show_points=True` (e.g. `jitter`,
                 `dodge`).
@@ -2116,21 +2132,37 @@ class Run:
         else:
             fig = ax.figure
 
-        sns.boxplot(
+        # Default palette = one distinct color per group (auto-coloring).
+        if palette is None:
+            palette = sns.color_palette("tab10", n_colors=len(order))
+
+        boxplot_extra = {
+            k: v for k, v in (boxplot_kwargs or {}).items()
+            if k not in {
+                "data", "x", "y", "hue", "order", "ax", "palette", "legend",
+            }
+        }
+        boxplot_call = dict(
             data=plot_df,
             x="__group__",
             y=field,
+            hue="__group__",
             order=order,
             ax=ax,
             palette=palette,
-            showfliers=not show_points,
-            **{
-                k: v for k, v in (boxplot_kwargs or {}).items()
-                if k not in {
-                    "data", "x", "y", "order", "ax", "palette", "showfliers"
-                }
-            },
+            legend=False,
+            showfliers=show_outliers,
         )
+        boxplot_call.update(boxplot_extra)
+
+        try:
+            sns.boxplot(**boxplot_call)
+        except TypeError:
+            # Older seaborn versions (<0.13) do not accept hue/legend on boxplot
+            # without an explicit hue variable; fall back to the simple form.
+            for key in ("hue", "legend"):
+                boxplot_call.pop(key, None)
+            sns.boxplot(**boxplot_call)
 
         if show_points and len(plot_df) > 0:
             if len(plot_df) > max_points:
@@ -2184,6 +2216,7 @@ class Run:
                 linewidth=bracket_linewidth,
                 fontsize=bracket_fontsize,
                 ns_label=ns_label,
+                significance_thresholds=significance_thresholds,
             )
 
         fig.tight_layout()
@@ -2191,8 +2224,16 @@ class Run:
 
     @staticmethod
     def _build_comparison_pairs(order, comparisons):
-        """Return list of (group_a, group_b) pairs to test for significance."""
-        if comparisons is None or comparisons == "all":
+        """Return list of (group_a, group_b) pairs to test for significance.
+
+        - `None`: no pairs (skip significance brackets).
+        - `"all"`: every unordered pair.
+        - `"adjacent"`: neighbours in `order`.
+        - List of `(a, b)` tuples: explicit pairs.
+        """
+        if comparisons is None:
+            return []
+        if comparisons == "all":
             return [
                 (order[i], order[j])
                 for i in range(len(order))
@@ -2275,8 +2316,27 @@ class Run:
         raise ValueError(f"Unknown method: {method}")
 
     @staticmethod
-    def _pvalue_to_stars(p, ns_label="ns"):
-        """Convert a p-value to a star annotation."""
+    def _default_significance_thresholds() -> list[tuple[float, str]]:
+        """Default (p_threshold, label) ordering used to convert p to stars."""
+        return [
+            (1e-4, "****"),
+            (1e-3, "***"),
+            (1e-2, "**"),
+            (5e-2, "*"),
+        ]
+
+    @staticmethod
+    def _pvalue_to_stars(
+        p,
+        ns_label: str = "ns",
+        thresholds: list[tuple[float, str]] | None = None,
+    ) -> str:
+        """Convert a p-value to a star annotation using configurable thresholds.
+
+        Thresholds are a list of `(p_threshold, label)` tuples. The first
+        tuple whose `p_threshold >= p` wins; if none match, `ns_label` is
+        returned. Use stricter thresholds first.
+        """
         if p is None:
             return ns_label
         try:
@@ -2285,14 +2345,13 @@ class Run:
             return ns_label
         if np.isnan(p_f):
             return ns_label
-        if p_f <= 1e-4:
-            return "****"
-        if p_f <= 1e-3:
-            return "***"
-        if p_f <= 1e-2:
-            return "**"
-        if p_f <= 5e-2:
-            return "*"
+
+        if thresholds is None:
+            thresholds = Run._default_significance_thresholds()
+
+        for threshold, label in thresholds:
+            if p_f <= float(threshold):
+                return label
         return ns_label
 
     @staticmethod
@@ -2306,6 +2365,7 @@ class Run:
         linewidth=1.0,
         fontsize=11.0,
         ns_label="ns",
+        significance_thresholds: list[tuple[float, str]] | None = None,
     ):
         """Draw stacked significance brackets with star annotations."""
         if not pairs:
@@ -2351,7 +2411,11 @@ class Run:
                 color=color,
                 clip_on=False,
             )
-            label = Run._pvalue_to_stars(pvalues[orig_idx], ns_label=ns_label)
+            label = Run._pvalue_to_stars(
+                pvalues[orig_idx],
+                ns_label=ns_label,
+                thresholds=significance_thresholds,
+            )
             ax.text(
                 (x1 + x2) / 2.0,
                 y + tick,

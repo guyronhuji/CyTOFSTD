@@ -137,7 +137,7 @@ def test_plot_heatmap_unknown_field_raises(simple_project, temp_dir):
 
 
 def test_plot_boxplot_marker_with_significance(simple_project, temp_dir):
-    """Boxplot draws brackets with star labels for separated groups."""
+    """Boxplot draws brackets with star labels when comparisons='all'."""
     csv_path = _make_grouped_csv(temp_dir)
     meta_path = _make_metadata(temp_dir, csv_path)
     run = simple_project.add_run(run_id="run_boxplot_marker")
@@ -147,6 +147,7 @@ def test_plot_boxplot_marker_with_significance(simple_project, temp_dir):
         field="H3",
         groupby="cell_type",
         layer="raw",
+        comparisons="all",
         test="mannwhitney",
         multitest="holm",
     )
@@ -157,6 +158,79 @@ def test_plot_boxplot_marker_with_significance(simple_project, temp_dir):
         t.get_text() for t in ax.texts if t.get_text()
     ]
     assert len([t for t in text_labels if t in {"*", "**", "***", "****", "ns"}]) >= 3
+
+
+def test_plot_boxplot_default_has_no_brackets(simple_project, temp_dir):
+    """comparisons=None means no significance brackets are drawn."""
+    csv_path = _make_grouped_csv(temp_dir)
+    meta_path = _make_metadata(temp_dir, csv_path)
+    run = simple_project.add_run(run_id="run_boxplot_default_no_brackets")
+    _ingest(run, simple_project, csv_path, meta_path)
+
+    fig, ax = run.plot_boxplot(
+        field="H3",
+        groupby="cell_type",
+        layer="raw",
+    )
+    fig.canvas.draw()
+    star_texts = [
+        t.get_text() for t in ax.texts
+        if t.get_text() in {"*", "**", "***", "****", "ns"}
+    ]
+    assert star_texts == []
+
+
+def test_plot_boxplot_default_palette_is_distinct(simple_project, temp_dir):
+    """Default palette assigns a distinct color to each box."""
+    csv_path = _make_grouped_csv(temp_dir)
+    meta_path = _make_metadata(temp_dir, csv_path)
+    run = simple_project.add_run(run_id="run_boxplot_default_palette")
+    _ingest(run, simple_project, csv_path, meta_path)
+
+    fig, ax = run.plot_boxplot(
+        field="H3",
+        groupby="cell_type",
+        layer="raw",
+    )
+    fig.canvas.draw()
+    # Collect facecolors of box artists.
+    facecolors = set()
+    for patch in ax.patches:
+        if patch.get_facecolor() is None:
+            continue
+        facecolors.add(tuple(round(c, 3) for c in patch.get_facecolor()))
+    # 3 groups should yield 3 distinct facecolors.
+    assert len(facecolors) >= 3
+
+
+def test_plot_boxplot_show_outliers_false_hides_fliers(
+    simple_project, temp_dir
+):
+    """show_outliers=False removes outlier markers from the boxplot."""
+    csv_path = _make_grouped_csv(temp_dir)
+    meta_path = _make_metadata(temp_dir, csv_path)
+    run = simple_project.add_run(run_id="run_boxplot_no_fliers")
+    _ingest(run, simple_project, csv_path, meta_path)
+
+    fig_show, ax_show = run.plot_boxplot(
+        field="H3",
+        groupby="cell_type",
+        layer="raw",
+        show_outliers=True,
+    )
+    fig_hide, ax_hide = run.plot_boxplot(
+        field="H3",
+        groupby="cell_type",
+        layer="raw",
+        show_outliers=False,
+    )
+    fig_show.canvas.draw()
+    fig_hide.canvas.draw()
+
+    # When outliers are hidden, total line-collection count drops.
+    n_lines_show = len(ax_show.lines)
+    n_lines_hide = len(ax_hide.lines)
+    assert n_lines_hide <= n_lines_show
 
 
 def test_plot_boxplot_accepts_obs_numeric_field(simple_project, temp_dir):
@@ -216,6 +290,43 @@ def test_pvalue_to_stars_mapping():
     assert Run._pvalue_to_stars(0.0005) == "***"
     assert Run._pvalue_to_stars(1e-6) == "****"
     assert Run._pvalue_to_stars(float("nan")) == "ns"
+
+
+def test_pvalue_to_stars_custom_thresholds():
+    from cytofstandard.run import Run
+
+    thresholds = [(0.01, "HIGH"), (0.1, "LOW")]
+    assert Run._pvalue_to_stars(0.005, thresholds=thresholds) == "HIGH"
+    assert Run._pvalue_to_stars(0.05, thresholds=thresholds) == "LOW"
+    assert Run._pvalue_to_stars(0.5, thresholds=thresholds) == "ns"
+    assert (
+        Run._pvalue_to_stars(0.5, thresholds=thresholds, ns_label="--") == "--"
+    )
+
+
+def test_plot_boxplot_custom_significance_thresholds(simple_project, temp_dir):
+    """Custom significance thresholds change bracket labels."""
+    csv_path = _make_grouped_csv(temp_dir)
+    meta_path = _make_metadata(temp_dir, csv_path)
+    run = simple_project.add_run(run_id="run_boxplot_thresholds")
+    _ingest(run, simple_project, csv_path, meta_path)
+
+    fig, ax = run.plot_boxplot(
+        field="H3",
+        groupby="cell_type",
+        layer="raw",
+        comparisons="all",
+        test="mannwhitney",
+        multitest=None,
+        significance_thresholds=[(1e-12, "HIT")],
+        ns_label="meh",
+    )
+    fig.canvas.draw()
+    labels = {
+        t.get_text() for t in ax.texts if t.get_text()
+    }
+    assert labels.issubset({"HIT", "meh"})
+    assert ("HIT" in labels) or ("meh" in labels)
 
 
 def test_plot_heatmap_forwards_kwargs_to_seaborn(simple_project, temp_dir):

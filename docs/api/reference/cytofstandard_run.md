@@ -123,7 +123,7 @@ Returns:
       - obs: copied run obs
       - obsm: selected embedding (if available)
 
-##### `plot_boxplot(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'holm', show_points: bool = False, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)`
+##### `plot_boxplot(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'holm', show_points: bool = False, show_outliers: bool = True, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', significance_thresholds: list[tuple[float, str]] | None = None, random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)`
 
 Boxplot for a single field grouped by an obs column, with significance brackets.
 
@@ -137,27 +137,41 @@ Args:
     layer: Layer used when `field` is a marker (default `X`).
     order: Optional explicit group order along the x-axis.
     comparisons: Pairs to test. Accepts:
-        - `None` or `"all"`: all unordered pairs.
+        - `None` (default): no significance brackets are drawn.
+        - `"all"`: all unordered pairs.
         - `"adjacent"`: only neighbours in `order`.
         - List of `(group_a, group_b)` tuples for explicit pairs.
     test: `"mannwhitney"` (default), `"ttest"`, or `"welch"`.
     multitest: `None`, `"holm"`, or `"bonferroni"`.
     show_points: Overlay a stripplot of per-cell points (subsampled).
+    show_outliers: Whether to render boxplot outlier markers
+        (maps to seaborn's `showfliers`). Defaults to True. Set to
+        False to clean up dense plots (or pass `"showfliers": False`
+        via `boxplot_kwargs`, which takes precedence).
     max_points: Maximum number of stripplot points (subsampled).
     point_alpha: Alpha for overlaid points.
     point_size: Size for overlaid points.
-    palette: Seaborn palette name or color list for the boxes.
+    palette: Seaborn palette name, color list, or dict. When None,
+        a distinct color per group is generated automatically using
+        the `"tab10"` palette.
     figsize: Optional figure size.
     ax: Optional matplotlib axes to draw into.
     bracket_color: Color used for significance brackets.
     bracket_linewidth: Line width used for significance brackets.
     bracket_fontsize: Font size used for significance labels.
     ns_label: Label used for non-significant comparisons.
+    significance_thresholds: Ordered list of `(p_threshold, label)`
+        tuples used to convert each (adjusted) p-value into a star
+        label. The first tuple whose `p_threshold` is `>= p` wins.
+        Provide thresholds from strictest to loosest, for example
+        `[(1e-4, "****"), (1e-3, "***"), (1e-2, "**"), (5e-2, "*")]`
+        (the default). Any p-value larger than every threshold is
+        labelled with `ns_label`.
     random_state: Seed used when subsampling points.
     boxplot_kwargs: Extra keyword arguments forwarded to
         `seaborn.boxplot` (e.g. `width`, `linewidth`, `notch`,
-        `whis`, `saturation`). Explicit arguments above take
-        precedence over keys in this dict.
+        `whis`, `saturation`, `showfliers`). Keys here override the
+        explicit arguments above.
     stripplot_kwargs: Extra keyword arguments forwarded to
         `seaborn.stripplot` when `show_points=True` (e.g. `jitter`,
         `dodge`).
