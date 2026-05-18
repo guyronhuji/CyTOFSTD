@@ -123,6 +123,80 @@ Returns:
       - obs: copied run obs
       - obsm: selected embedding (if available)
 
+##### `plot_boxplot(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'holm', show_points: bool = False, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)`
+
+Boxplot for a single field grouped by an obs column, with significance brackets.
+
+The field can be a marker (in `adata.var_names`) or a numeric obs
+column. `groupby` can be a single obs column or a list of obs columns
+for composite grouping.
+
+Args:
+    field: Marker name or numeric obs column to plot.
+    groupby: Single obs column or list of obs columns.
+    layer: Layer used when `field` is a marker (default `X`).
+    order: Optional explicit group order along the x-axis.
+    comparisons: Pairs to test. Accepts:
+        - `None` or `"all"`: all unordered pairs.
+        - `"adjacent"`: only neighbours in `order`.
+        - List of `(group_a, group_b)` tuples for explicit pairs.
+    test: `"mannwhitney"` (default), `"ttest"`, or `"welch"`.
+    multitest: `None`, `"holm"`, or `"bonferroni"`.
+    show_points: Overlay a stripplot of per-cell points (subsampled).
+    max_points: Maximum number of stripplot points (subsampled).
+    point_alpha: Alpha for overlaid points.
+    point_size: Size for overlaid points.
+    palette: Seaborn palette name or color list for the boxes.
+    figsize: Optional figure size.
+    ax: Optional matplotlib axes to draw into.
+    bracket_color: Color used for significance brackets.
+    bracket_linewidth: Line width used for significance brackets.
+    bracket_fontsize: Font size used for significance labels.
+    ns_label: Label used for non-significant comparisons.
+    random_state: Seed used when subsampling points.
+    boxplot_kwargs: Extra keyword arguments forwarded to
+        `seaborn.boxplot` (e.g. `width`, `linewidth`, `notch`,
+        `whis`, `saturation`). Explicit arguments above take
+        precedence over keys in this dict.
+    stripplot_kwargs: Extra keyword arguments forwarded to
+        `seaborn.stripplot` when `show_points=True` (e.g. `jitter`,
+        `dodge`).
+
+Returns:
+    Tuple of (figure, axes).
+
+##### `plot_heatmap(self, fields: list[str], groupby, layer: str = 'X', agg: str = 'mean', standard_scale: str | None = None, cmap: str | None = None, center: float | None = None, annot: bool = False, fmt: str = '.2f', order: list[str] | None = None, figsize: tuple[float, float] | None = None, ax = None, heatmap_kwargs: dict | None = None)`
+
+Plot a heatmap of aggregated field values grouped by an obs column.
+
+Fields can be markers (in `adata.var_names`) or numeric `adata.obs`
+columns. `groupby` can be a single obs column or a list of obs columns
+for composite grouping (e.g. `["line_id", "condition"]`).
+
+Args:
+    fields: Markers or numeric obs columns to include as heatmap rows.
+    groupby: Single obs column name or a list of obs column names.
+    layer: Layer used when a field is a marker (default `X`).
+    agg: `"mean"` or `"median"`.
+    standard_scale: `None`, `"row"`, or `"column"`. Applies z-score over
+        rows (fields) or columns (groups) after aggregation.
+    cmap: Matplotlib colormap. Defaults to `viridis` (raw) or `RdBu_r`
+        (when `standard_scale` is set).
+    center: Value at which to center the colormap. Defaults to 0 when
+        `standard_scale` is set, otherwise None.
+    annot: If True, write the aggregated value in each cell.
+    fmt: Format string used when `annot=True`.
+    order: Optional explicit group order along the x-axis.
+    figsize: Optional figure size.
+    ax: Optional matplotlib axes to draw into.
+    heatmap_kwargs: Extra keyword arguments forwarded to
+        `seaborn.heatmap` (e.g. `linewidths`, `linecolor`,
+        `cbar_kws`, `vmin`, `vmax`). Explicit arguments above take
+        precedence over keys in this dict.
+
+Returns:
+    Tuple of (figure, axes).
+
 ##### `plot_marker_histograms(self, markers: list[str], layer: str = 'X', cofactor: float = 5.0, fill: bool = False, stat: str = 'density', element: str = 'step', bins: int | str = 'auto')`
 
 Plot per-sample histograms for selected markers.

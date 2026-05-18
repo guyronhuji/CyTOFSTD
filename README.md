@@ -157,6 +157,74 @@ perm_adata = run.permcell_to_adata(
 )
 ```
 
+## Heatmaps and Boxplots
+
+Both helpers accept marker names (from `adata.var_names`) **or** numeric obs
+columns (e.g. per-cell scores, cluster labels cast to numeric, manual gates),
+and `groupby` can be a single obs column or a list of obs columns for composite
+grouping.
+
+```python
+# Mean expression heatmap, markers as rows, groups as columns
+run.plot_heatmap(
+    fields=["H3", "H3K27me3", "ECad", "EpCAM"],
+    groupby="sample_id",
+    layer="normalized",
+    agg="mean",
+    standard_scale="row",   # z-score per marker for readability
+)
+
+# Composite grouping (line + condition)
+run.plot_heatmap(
+    fields=["H3K27ac", "H3K27me3"],
+    groupby=["line_id", "condition"],
+    layer="normalized",
+    agg="median",
+)
+
+# Mix markers and numeric obs columns (e.g. a PermCell score)
+run.plot_heatmap(
+    fields=["H3K27me3", "permcell_epi_z"],
+    groupby="leiden_cluster",
+    layer="normalized",
+    agg="mean",
+    standard_scale="row",
+    heatmap_kwargs={"linewidths": 0.5, "linecolor": "white", "vmax": 2.0},
+)
+```
+
+```python
+# Boxplot of one marker per group with significance brackets
+run.plot_boxplot(
+    field="H3K27me3",
+    groupby="condition",
+    layer="normalized",
+    test="mannwhitney",   # 'mannwhitney' | 'ttest' | 'welch'
+    multitest="holm",     # None | 'holm' | 'bonferroni'
+    show_points=True,     # overlay subsampled stripplot
+    boxplot_kwargs={"width": 0.5, "notch": True},
+    stripplot_kwargs={"jitter": 0.15},
+)
+
+# Boxplot of a numeric obs column (e.g. PermCell z-score) per cluster
+run.plot_boxplot(
+    field="permcell_epi_z",
+    groupby="leiden_cluster",
+    test="welch",
+    comparisons=[("0", "1"), ("0", "2")],   # only test selected pairs
+)
+```
+
+Significance brackets use:
+
+| p-value     | Label  |
+| ----------- | ------ |
+| `> 0.05`    | `ns`   |
+| `<= 0.05`   | `*`    |
+| `<= 0.01`   | `**`   |
+| `<= 0.001`  | `***`  |
+| `<= 0.0001` | `****` |
+
 ## API Documentation
 
 This repository includes generated API description files:

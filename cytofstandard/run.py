@@ -1808,6 +1808,565 @@ class Run:
         fig.tight_layout()
         return fig, axes
 
+    def _resolve_field_values(
+        self,
+        adata: anndata.AnnData,
+        field: str,
+        layer: str,
+    ) -> tuple[np.ndarray, str]:
+        """Return per-cell numeric values for a marker or numeric obs column.
+
+        Args:
+            adata: AnnData object.
+            field: Marker name (in `adata.var_names`) or numeric obs column.
+            layer: Expression layer used when `field` is a marker.
+
+        Returns:
+            (values, kind) where kind is "marker" or "obs".
+        """
+        var_names = adata.var_names.astype(str).tolist()
+        if field in var_names:
+            matrix = self._matrix_from_layer(adata, layer)
+            idx = var_names.index(field)
+            return np.asarray(matrix[:, idx], dtype=np.float64), "marker"
+
+        if field in adata.obs.columns:
+            series = adata.obs[field]
+            values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64)
+            if np.all(np.isnan(values)):
+                raise ValueError(
+                    f"obs column '{field}' is not numeric and cannot be aggregated or plotted."
+                )
+            return values, "obs"
+
+        raise ValueError(
+            f"Field '{field}' not found in adata.var_names or adata.obs columns."
+        )
+
+    @staticmethod
+    def _resolve_groupby_series(
+        adata: anndata.AnnData,
+        groupby,
+    ) -> pd.Series:
+        """Resolve `groupby` (str or list[str]) to a per-cell group label series."""
+        if isinstance(groupby, str):
+            if groupby not in adata.obs.columns:
+                raise ValueError(
+                    f"groupby '{groupby}' not in obs columns: "
+                    f"{list(adata.obs.columns)}"
+                )
+            return adata.obs[groupby].astype(str).rename(groupby)
+
+        if isinstance(groupby, (list, tuple)):
+            cols = list(groupby)
+            for col in cols:
+                if col not in adata.obs.columns:
+                    raise ValueError(
+                        f"groupby column '{col}' not in obs columns: "
+                        f"{list(adata.obs.columns)}"
+                    )
+            joined = adata.obs[cols].astype(str).agg(" | ".join, axis=1)
+            return joined.rename(" | ".join(cols))
+
+        raise TypeError("groupby must be a str or a list/tuple of str.")
+
+    def plot_heatmap(
+        self,
+        fields: list[str],
+        groupby,
+        layer: str = "X",
+        agg: str = "mean",
+        standard_scale: str | None = None,
+        cmap: str | None = None,
+        center: float | None = None,
+        annot: bool = False,
+        fmt: str = ".2f",
+        order: list[str] | None = None,
+        figsize: tuple[float, float] | None = None,
+        ax=None,
+        heatmap_kwargs: dict | None = None,
+    ):
+        """Plot a heatmap of aggregated field values grouped by an obs column.
+
+        Fields can be markers (in `adata.var_names`) or numeric `adata.obs`
+        columns. `groupby` can be a single obs column or a list of obs columns
+        for composite grouping (e.g. `["line_id", "condition"]`).
+
+        Args:
+            fields: Markers or numeric obs columns to include as heatmap rows.
+            groupby: Single obs column name or a list of obs column names.
+            layer: Layer used when a field is a marker (default `X`).
+            agg: `"mean"` or `"median"`.
+            standard_scale: `None`, `"row"`, or `"column"`. Applies z-score over
+                rows (fields) or columns (groups) after aggregation.
+            cmap: Matplotlib colormap. Defaults to `viridis` (raw) or `RdBu_r`
+                (when `standard_scale` is set).
+            center: Value at which to center the colormap. Defaults to 0 when
+                `standard_scale` is set, otherwise None.
+            annot: If True, write the aggregated value in each cell.
+            fmt: Format string used when `annot=True`.
+            order: Optional explicit group order along the x-axis.
+            figsize: Optional figure size.
+            ax: Optional matplotlib axes to draw into.
+            heatmap_kwargs: Extra keyword arguments forwarded to
+                `seaborn.heatmap` (e.g. `linewidths`, `linecolor`,
+                `cbar_kws`, `vmin`, `vmax`). Explicit arguments above take
+                precedence over keys in this dict.
+
+        Returns:
+            Tuple of (figure, axes).
+        """
+        if not fields:
+            raise ValueError("fields cannot be empty")
+        if agg not in {"mean", "median"}:
+            raise ValueError("agg must be 'mean' or 'median'")
+        if standard_scale not in {None, "row", "column"}:
+            raise ValueError("standard_scale must be None, 'row', or 'column'")
+
+        try:
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+        except ImportError as exc:
+            raise ImportError(
+                "plot_heatmap requires matplotlib and seaborn. "
+                "Install with: pip install matplotlib seaborn"
+            ) from exc
+
+        adata = self.read_adata()
+        group_series = self._resolve_groupby_series(adata, groupby).reset_index(drop=True)
+
+        columns = {}
+        for f in fields:
+            values, _ = self._resolve_field_values(adata, f, layer)
+            columns[f] = values
+
+        long_df = pd.DataFrame(columns)
+        long_df["__group__"] = group_series.values
+
+        grouped = long_df.groupby("__group__", observed=True)[fields]
+        table = grouped.mean() if agg == "mean" else grouped.median()
+
+        if order is not None:
+            missing = [g for g in order if g not in table.index]
+            if missing:
+                raise ValueError(f"order contains unknown groups: {missing}")
+            table = table.loc[order]
+        else:
+            table = table.sort_index()
+
+        # Rows = fields (markers/obs), columns = groups
+        matrix = table.T
+
+        scaled = matrix.astype(float).copy()
+        if standard_scale == "row":
+            row_mean = scaled.mean(axis=1)
+            row_std = scaled.std(axis=1).replace(0, np.nan)
+            scaled = scaled.sub(row_mean, axis=0).div(row_std, axis=0).fillna(0.0)
+        elif standard_scale == "column":
+            col_mean = scaled.mean(axis=0)
+            col_std = scaled.std(axis=0).replace(0, np.nan)
+            scaled = scaled.sub(col_mean, axis=1).div(col_std, axis=1).fillna(0.0)
+
+        if cmap is None:
+            cmap = "RdBu_r" if standard_scale is not None else "viridis"
+        if center is None and standard_scale is not None:
+            center = 0.0
+
+        if figsize is None:
+            figsize = (
+                max(4.0, 0.6 * scaled.shape[1] + 2.0),
+                max(3.0, 0.4 * scaled.shape[0] + 2.0),
+            )
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig = ax.figure
+
+        sns.heatmap(
+            scaled,
+            ax=ax,
+            cmap=cmap,
+            center=center,
+            annot=annot,
+            fmt=fmt,
+            cbar=True,
+            **{
+                k: v for k, v in (heatmap_kwargs or {}).items()
+                if k not in {"data", "ax", "cmap", "center", "annot", "fmt"}
+            },
+        )
+
+        group_label = (
+            groupby if isinstance(groupby, str) else " | ".join(groupby)
+        )
+        scale_suffix = f" ({standard_scale}-z)" if standard_scale else ""
+        ax.set_xlabel(group_label)
+        ax.set_ylabel("field")
+        ax.set_title(f"{agg}{scale_suffix} by {group_label}")
+        fig.tight_layout()
+        return fig, ax
+
+    def plot_boxplot(
+        self,
+        field: str,
+        groupby,
+        layer: str = "X",
+        order: list[str] | None = None,
+        comparisons=None,
+        test: str = "mannwhitney",
+        multitest: str | None = "holm",
+        show_points: bool = False,
+        max_points: int = 2000,
+        point_alpha: float = 0.4,
+        point_size: float = 2.0,
+        palette=None,
+        figsize: tuple[float, float] | None = None,
+        ax=None,
+        bracket_color: str = "black",
+        bracket_linewidth: float = 1.0,
+        bracket_fontsize: float = 11.0,
+        ns_label: str = "ns",
+        random_state: int = 0,
+        boxplot_kwargs: dict | None = None,
+        stripplot_kwargs: dict | None = None,
+    ):
+        """Boxplot for a single field grouped by an obs column, with significance brackets.
+
+        The field can be a marker (in `adata.var_names`) or a numeric obs
+        column. `groupby` can be a single obs column or a list of obs columns
+        for composite grouping.
+
+        Args:
+            field: Marker name or numeric obs column to plot.
+            groupby: Single obs column or list of obs columns.
+            layer: Layer used when `field` is a marker (default `X`).
+            order: Optional explicit group order along the x-axis.
+            comparisons: Pairs to test. Accepts:
+                - `None` or `"all"`: all unordered pairs.
+                - `"adjacent"`: only neighbours in `order`.
+                - List of `(group_a, group_b)` tuples for explicit pairs.
+            test: `"mannwhitney"` (default), `"ttest"`, or `"welch"`.
+            multitest: `None`, `"holm"`, or `"bonferroni"`.
+            show_points: Overlay a stripplot of per-cell points (subsampled).
+            max_points: Maximum number of stripplot points (subsampled).
+            point_alpha: Alpha for overlaid points.
+            point_size: Size for overlaid points.
+            palette: Seaborn palette name or color list for the boxes.
+            figsize: Optional figure size.
+            ax: Optional matplotlib axes to draw into.
+            bracket_color: Color used for significance brackets.
+            bracket_linewidth: Line width used for significance brackets.
+            bracket_fontsize: Font size used for significance labels.
+            ns_label: Label used for non-significant comparisons.
+            random_state: Seed used when subsampling points.
+            boxplot_kwargs: Extra keyword arguments forwarded to
+                `seaborn.boxplot` (e.g. `width`, `linewidth`, `notch`,
+                `whis`, `saturation`). Explicit arguments above take
+                precedence over keys in this dict.
+            stripplot_kwargs: Extra keyword arguments forwarded to
+                `seaborn.stripplot` when `show_points=True` (e.g. `jitter`,
+                `dodge`).
+
+        Returns:
+            Tuple of (figure, axes).
+        """
+        if test not in {"mannwhitney", "ttest", "welch"}:
+            raise ValueError("test must be 'mannwhitney', 'ttest', or 'welch'")
+        if multitest not in {None, "holm", "bonferroni"}:
+            raise ValueError("multitest must be None, 'holm', or 'bonferroni'")
+
+        try:
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+        except ImportError as exc:
+            raise ImportError(
+                "plot_boxplot requires matplotlib and seaborn. "
+                "Install with: pip install matplotlib seaborn"
+            ) from exc
+
+        adata = self.read_adata()
+        values, _ = self._resolve_field_values(adata, field, layer)
+        group_series = self._resolve_groupby_series(adata, groupby).reset_index(drop=True)
+
+        plot_df = pd.DataFrame(
+            {
+                field: values,
+                "__group__": group_series.values,
+            }
+        ).dropna(subset=[field, "__group__"])
+
+        if order is None:
+            order = sorted(plot_df["__group__"].unique().tolist())
+        else:
+            missing = [g for g in order if g not in plot_df["__group__"].unique()]
+            if missing:
+                raise ValueError(f"order contains unknown groups: {missing}")
+
+        plot_df = plot_df[plot_df["__group__"].isin(order)]
+        plot_df["__group__"] = pd.Categorical(
+            plot_df["__group__"], categories=order, ordered=True
+        )
+
+        if figsize is None:
+            figsize = (max(4.0, 0.7 * len(order) + 2.0), 4.5)
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig = ax.figure
+
+        sns.boxplot(
+            data=plot_df,
+            x="__group__",
+            y=field,
+            order=order,
+            ax=ax,
+            palette=palette,
+            showfliers=not show_points,
+            **{
+                k: v for k, v in (boxplot_kwargs or {}).items()
+                if k not in {
+                    "data", "x", "y", "order", "ax", "palette", "showfliers"
+                }
+            },
+        )
+
+        if show_points and len(plot_df) > 0:
+            if len(plot_df) > max_points:
+                sampled = plot_df.sample(n=max_points, random_state=random_state)
+            else:
+                sampled = plot_df
+            sns.stripplot(
+                data=sampled,
+                x="__group__",
+                y=field,
+                order=order,
+                color="black",
+                alpha=point_alpha,
+                size=point_size,
+                ax=ax,
+                **{
+                    k: v for k, v in (stripplot_kwargs or {}).items()
+                    if k not in {
+                        "data", "x", "y", "order", "ax",
+                        "color", "alpha", "size",
+                    }
+                },
+            )
+
+        group_label = (
+            groupby if isinstance(groupby, str) else " | ".join(groupby)
+        )
+        ax.set_xlabel(group_label)
+        ax.set_ylabel(field)
+        ax.set_title(f"{field} by {group_label}")
+
+        pairs = self._build_comparison_pairs(order, comparisons)
+        if pairs:
+            values_by_group = {
+                g: plot_df.loc[plot_df["__group__"] == g, field].to_numpy()
+                for g in order
+            }
+            pvalues = self._compute_pairwise_pvalues(
+                values_by_group, pairs, test=test
+            )
+            if multitest is not None:
+                pvalues = self._adjust_pvalues(pvalues, method=multitest)
+
+            self._draw_significance_brackets(
+                ax,
+                pairs=pairs,
+                group_positions={g: i for i, g in enumerate(order)},
+                pvalues=pvalues,
+                data_values=plot_df[field].to_numpy(),
+                color=bracket_color,
+                linewidth=bracket_linewidth,
+                fontsize=bracket_fontsize,
+                ns_label=ns_label,
+            )
+
+        fig.tight_layout()
+        return fig, ax
+
+    @staticmethod
+    def _build_comparison_pairs(order, comparisons):
+        """Return list of (group_a, group_b) pairs to test for significance."""
+        if comparisons is None or comparisons == "all":
+            return [
+                (order[i], order[j])
+                for i in range(len(order))
+                for j in range(i + 1, len(order))
+            ]
+        if comparisons == "adjacent":
+            return [(order[i], order[i + 1]) for i in range(len(order) - 1)]
+
+        pairs = []
+        for pair in comparisons:
+            if len(pair) != 2:
+                raise ValueError(
+                    "Each comparison must be a (group_a, group_b) pair."
+                )
+            a, b = pair
+            if a not in order or b not in order:
+                raise ValueError(
+                    f"comparison ({a}, {b}) contains unknown groups."
+                )
+            pairs.append((a, b))
+        return pairs
+
+    @staticmethod
+    def _compute_pairwise_pvalues(values_by_group, pairs, test):
+        """Compute p-values for the requested pair tests using scipy.stats."""
+        try:
+            from scipy import stats
+        except ImportError as exc:
+            raise ImportError(
+                "Significance tests require scipy. Install with: pip install scipy"
+            ) from exc
+
+        pvals = []
+        for a, b in pairs:
+            x = np.asarray(values_by_group.get(a, np.array([])), dtype=float)
+            y = np.asarray(values_by_group.get(b, np.array([])), dtype=float)
+            x = x[~np.isnan(x)]
+            y = y[~np.isnan(y)]
+            if len(x) < 2 or len(y) < 2:
+                pvals.append(float("nan"))
+                continue
+            if test == "mannwhitney":
+                _, p = stats.mannwhitneyu(x, y, alternative="two-sided")
+            elif test == "ttest":
+                _, p = stats.ttest_ind(x, y, equal_var=True)
+            elif test == "welch":
+                _, p = stats.ttest_ind(x, y, equal_var=False)
+            else:
+                raise ValueError(f"Unknown test: {test}")
+            pvals.append(float(p))
+        return pvals
+
+    @staticmethod
+    def _adjust_pvalues(pvalues, method="holm"):
+        """Apply Holm or Bonferroni correction across pairwise p-values."""
+        pvals = np.asarray(pvalues, dtype=float)
+        valid_mask = ~np.isnan(pvals)
+        n_valid = int(valid_mask.sum())
+        if n_valid == 0:
+            return pvals.tolist()
+
+        if method == "bonferroni":
+            adjusted = pvals.copy()
+            adjusted[valid_mask] = np.minimum(pvals[valid_mask] * n_valid, 1.0)
+            return adjusted.tolist()
+
+        if method == "holm":
+            adjusted = pvals.copy()
+            valid_idx = np.where(valid_mask)[0]
+            order_local = np.argsort(pvals[valid_idx])
+            running_max = 0.0
+            for rank, local_idx in enumerate(order_local):
+                orig = valid_idx[local_idx]
+                value = pvals[orig] * (n_valid - rank)
+                value = min(value, 1.0)
+                running_max = max(running_max, value)
+                adjusted[orig] = running_max
+            return adjusted.tolist()
+
+        raise ValueError(f"Unknown method: {method}")
+
+    @staticmethod
+    def _pvalue_to_stars(p, ns_label="ns"):
+        """Convert a p-value to a star annotation."""
+        if p is None:
+            return ns_label
+        try:
+            p_f = float(p)
+        except (TypeError, ValueError):
+            return ns_label
+        if np.isnan(p_f):
+            return ns_label
+        if p_f <= 1e-4:
+            return "****"
+        if p_f <= 1e-3:
+            return "***"
+        if p_f <= 1e-2:
+            return "**"
+        if p_f <= 5e-2:
+            return "*"
+        return ns_label
+
+    @staticmethod
+    def _draw_significance_brackets(
+        ax,
+        pairs,
+        group_positions,
+        pvalues,
+        data_values,
+        color="black",
+        linewidth=1.0,
+        fontsize=11.0,
+        ns_label="ns",
+    ):
+        """Draw stacked significance brackets with star annotations."""
+        if not pairs:
+            return
+
+        y_min, y_max = ax.get_ylim()
+        finite_values = np.asarray(data_values, dtype=float)
+        finite_values = finite_values[np.isfinite(finite_values)]
+        if finite_values.size:
+            data_max = float(np.max(finite_values))
+        else:
+            data_max = y_max
+
+        span = data_max - y_min if data_max > y_min else max(abs(data_max), 1.0)
+        base = data_max + 0.06 * span
+        step = 0.08 * span
+        tick = 0.015 * span
+
+        indexed_pairs = sorted(
+            enumerate(pairs),
+            key=lambda ip: abs(
+                group_positions[ip[1][1]] - group_positions[ip[1][0]]
+            ),
+        )
+
+        occupied: list[tuple[float, float, float]] = []
+        for orig_idx, (a, b) in indexed_pairs:
+            x1 = group_positions[a]
+            x2 = group_positions[b]
+            lo, hi = min(x1, x2), max(x1, x2)
+
+            overlap_y = [
+                oy for ox_lo, ox_hi, oy in occupied
+                if not (hi < ox_lo or lo > ox_hi)
+            ]
+            y = max(overlap_y) + step if overlap_y else base
+            occupied.append((lo, hi, y))
+
+            ax.plot(
+                [x1, x1, x2, x2],
+                [y, y + tick, y + tick, y],
+                lw=linewidth,
+                color=color,
+                clip_on=False,
+            )
+            label = Run._pvalue_to_stars(pvalues[orig_idx], ns_label=ns_label)
+            ax.text(
+                (x1 + x2) / 2.0,
+                y + tick,
+                label,
+                ha="center",
+                va="bottom",
+                color=color,
+                fontsize=fontsize,
+                clip_on=False,
+            )
+
+        if occupied:
+            new_top = max(oy for _, _, oy in occupied) + 3 * step
+            ax.set_ylim(y_min, max(y_max, new_top))
+
     def qc_gate(
         self,
         gates: dict[str, Any],
