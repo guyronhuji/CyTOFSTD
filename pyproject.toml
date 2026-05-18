@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cytofstandard"
+version = "0.1.0"
+description = "Standard CyTOF analysis package"
+requires-python = ">=3.10"
+dependencies = [
+  "anndata",
+  "zarr",
+  "numpy",
+  "pandas",
+  "matplotlib",
+  "seaborn",
+  "pyarrow",
+  "pyyaml",
+  "xxhash",
+  "tqdm",
+  "fcsparser"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cytofstandard*"]

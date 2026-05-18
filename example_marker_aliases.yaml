@@ -1,0 +1,51 @@
+# Marker aliases for cytofstandard
+H3:
+  - H3
+  - Histone H3
+  - Ir-H3
+  - H3_total
+
+H3K27me3:
+  - H3K27me3
+  - H3K27me3_176
+  - H3K27me3(Yb176)
+  - H3K27me3-Yb176
+
+H3K9me2:
+  - H3K9me2
+  - H3K9me2_142
+  - H3K9me2(Yb142)
+
+H3K4me3:
+  - H3K4me3
+  - H3K4me3_242
+  - H3K4me3(Pm242)
+
+ECad:
+  - ECad
+  - E-Cadherin
+  - E Cadherin
+  - CDH1
+
+EpCAM:
+  - EpCAM
+  - EpCAM_111
+  - EpCAM(In111)
+
+panKeratin:
+  - panKeratin
+  - PanKeratin
+  - Pan-Keratin
+  - panCK
+  - PanCK
+
+ER:
+  - ER
+  - Estrogen Receptor
+  - ESR1
+
+Ki67:
+  - Ki67
+  - MKI67
+  - Ki67_164
+  - Ki67(Dy164)

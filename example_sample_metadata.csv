@@ -1,0 +1,4 @@
+file_name,sample_id,line_id,condition,replicate_id
+sample_A.fcs,S001,MCF7,control,rep1
+sample_B.fcs,S002,MCF7,treated,rep1
+sample_C.csv,S003,T47D,control,rep2

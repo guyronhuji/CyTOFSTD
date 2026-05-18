@@ -1,0 +1,12 @@
+standard_marker_name,marker_class,is_core_histone,is_identity_marker,is_functional_marker,is_qc_marker
+H3,histone,true,false,false,false
+H3K27me3,histone,false,false,true,false
+H3K9me2,histone,false,false,true,false
+H3K4me3,histone,false,false,true,false
+ECad,identity,false,true,false,false
+EpCAM,identity,false,true,false,false
+panKeratin,identity,false,true,false,false
+ER,functional,false,false,true,false
+Ki67,functional,false,false,true,false
+DAPI,nucleus,false,false,false,true
+Volume,cell_quality,false,false,false,true

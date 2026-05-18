@@ -1,0 +1,263 @@
+BMI1:
+- BMI-1
+- BMI1
+CD109:
+- CD109
+CD11b:
+- CD11b
+- CD11B
+CD11c:
+- CD11c
+CD19:
+- CD19
+CD206:
+- CD206
+CD24:
+- CD24
+CD25:
+- CD25
+CD298:
+- CD298
+CD31:
+- CD31
+CD3e:
+- CD3e
+- CD3E
+CD4:
+- CD4
+CD44:
+- CD44
+CD45:
+- CD45
+CD47:
+- CD47
+CD49b:
+- CD49b
+CD49f:
+- CD49f
+CD74:
+- CD74
+CD80:
+- CD80
+CD8a:
+- CD8a
+CD90.2:
+- CD90.2
+- CD90_2
+CXCR4:
+- CXCR4
+CleavedH3:
+- Cleaved
+- CleavedH3
+CyclinB1:
+- CyclinB1
+- CyclineB1
+DNA:
+- DNA
+- DNA1
+- DNA2
+E-cadherin:
+- E-cadherin
+- E_Cadherin
+- Ecad
+- ECad
+- E-cad
+- ECADHERIN
+ER:
+- ER
+EZH2:
+- EZH2
+EpCAM:
+- EpCAM
+- Epcam
+- EpCam
+- EPCAM
+FOXP3:
+- FOXP3
+GAL4:
+- Gal4
+- GAL4
+GATA3:
+- GATA3
+GATA6:
+- GATA6
+GFP:
+- GFP
+H2A:
+- H2A
+H2AK119ub:
+- H2A119Ub
+- H2AK119Ub
+- H2AK119ub
+- H2Aub
+- H2AK119UB
+H2B:
+- H2B
+H2BK5ac:
+- H2BK5ac
+- H2BK5Ac
+- H2BK5AC
+H3:
+- H3
+H3.3:
+- H3.3
+- H3_3
+H3K18ac:
+- H3K18ac
+H3K27M:
+- H3K27M
+H3K27ac:
+- H3K27ac
+- H3K27Ac
+- H3K27AC
+H3K27me2:
+- H3K27me2
+- H3K27ME2
+H3K27me3:
+- H3K27me3
+- H3K27ME3
+H3K36me2:
+- H3K36me2
+- H3K36ME2
+H3K36me3:
+- H3K36me3
+- H3K36ME3
+H3K4me1:
+- H3K4me1
+- H3K4ME1
+H3K4me2:
+- H3K4me2
+- H3K4ME2
+H3K4me3:
+- H3K4me3
+- H3K4ME3
+H3K64ac:
+- H3K64ac
+H3K79me2:
+- H3K79me2
+H3K9ac:
+- H3K9ac
+- H3K9Ac
+- H3K9AC
+H3K9me1:
+- H3K9me1
+H3K9me2:
+- H3K9me2
+- H3K9ME2
+H3K9me3:
+- H3K9me3
+- H3K9ME3
+H3S28p:
+- H3S28p
+H4:
+- H4
+H4K16ac:
+- H4K16ac
+- H4K16Ac
+- H4K16AC
+H4K20me3:
+- H3K20me3
+- H4K20me3
+- H4K20ME3
+HLA-ABC:
+- HLA-ABC
+IdU:
+- IdU
+Iridium:
+- Iridium
+KI67:
+- Ki-67
+- KI67
+- Ki67
+KLF4:
+- Klf4
+- KLF4
+KRT14:
+- KRT14
+KRT17:
+- KRT17
+KRT5:
+- Cytokeratin5
+- K5
+- KRT5
+KRT7:
+- KRT7
+KRT8-18:
+- K8-18
+- KRT8-18
+Ly-6C:
+- Ly-6C
+- Ly6C
+Ly-6G:
+- Ly-6G
+MBD:
+- MBD
+- MBD2
+MHC:
+- MHC
+MHC-II:
+- MHC-II
+- MHCII
+MHC-II (I-A/I-E):
+- MHC-II (I-A/I-E)
+Myc:
+- Myc
+N-cadherin:
+- N-cadherin
+- NCad
+NSD1:
+- NSD1
+OCT4:
+- OCT4
+PD-L1:
+- PD-L1
+PDPN:
+- PDPN
+Pan-KRT:
+- Pan-KRT
+- panKeratin
+- PANKRT
+- panKRT
+- PanKRT
+- PANKERATIN
+
+Cisplatin:
+- CISPLATIN
+Podoplanin:
+- Podoplanin
+S100A4:
+- S100A4
+SLC44A4:
+- SLC44A4
+TSPAN8:
+- TSPAN8
+Vimentin:
+- Vimentin
+- VIMENTIN
+ZEB1:
+- ZEB1
+aSMA:
+- aSMA
+mCD45:
+- mCD45
+- MouseCD45
+mMHC:
+- mMHC
+p53:
+- p53
+pERK:
+- pERK
+pH2A.X:
+- gH2AX
+- gH2Ax
+- pH2A.X
+- pH2AX
+- yH2A.X
+pH3:
+- pH3
+pRb:
+- p-Rb
+- pRb
+- pRB
+uH2A:
+- uH2A
