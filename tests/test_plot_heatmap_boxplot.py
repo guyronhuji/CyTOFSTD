@@ -149,7 +149,7 @@ def test_plot_boxplot_marker_with_significance(simple_project, temp_dir):
         layer="raw",
         comparisons="all",
         test="mannwhitney",
-        multitest="holm",
+        multitest="bh",
     )
     fig.canvas.draw()
 

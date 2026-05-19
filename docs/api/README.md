@@ -2,7 +2,7 @@
 
 Auto-generated from source code. Do not edit these files by hand.
 
-- Generated at: `2026-05-18T17:09:42.407131+00:00`
+- Generated at: `2026-05-19T03:48:12.807046+00:00`
 - Generator: `scripts/generate_api_docs.py`
 
 ## Modules

@@ -201,7 +201,7 @@ run.plot_boxplot(
     layer="normalized",
     comparisons="all",    # None=no brackets, "all", "adjacent", or pair list
     test="mannwhitney",   # 'mannwhitney' | 'ttest' | 'welch'
-    multitest="holm",     # None | 'holm' | 'bonferroni'
+    multitest="bh",       # None | 'bh' | 'bonferroni'
     show_points=True,     # overlay subsampled stripplot
     show_outliers=False,  # hide boxplot fliers
     boxplot_kwargs={"width": 0.5, "notch": True},

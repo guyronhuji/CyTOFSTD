@@ -27,6 +27,63 @@ Cluster cells with Leiden using graph artifacts from an embedding.
 Follows the Leiden settings used in the MetalUMAP notebook.
 Existing clusterings with the same key are overwritten.
 
+##### `cluster_leiden_jaccard(self, embedding_name: str, cluster_key: str | None = None, jaccard_connectivities_key: str | None = None, min_jaccard: float = 0.0, resolution: float = 1.0, n_iterations: int = 2, beta: float = 0.01, objective_function: str = 'modularity', seed: int = 42, verbose: bool = False, inplace: bool = True) -> dict[str, Any]`
+
+Cluster cells using a PhenoGraph-style Jaccard graph with Leiden.
+
+Equivalent to PhenoGraph but uses Leiden instead of Louvain:
+    1. KNN graph (pre-computed by `compute_umap`)
+    2. Edge weights replaced by Jaccard similarity of neighbor sets
+    3. Leiden community detection on the Jaccard-weighted graph
+
+The KNN indices are read from the `obsm` artifacts stored by
+`compute_umap`.  No recomputation of neighbors is performed.
+
+Args:
+    embedding_name: Name of the embedding whose KNN artifacts to use
+        (must have been computed via `compute_umap`).
+    cluster_key: Key under which cluster labels are stored in
+        `adata.obs`. Defaults to
+        `f"{embedding_name}_jaccard_leiden"`.
+    jaccard_connectivities_key: Key used to store the Jaccard
+        connectivity matrix in `adata.obsp`. Defaults to
+        `f"{embedding_name}_jaccard_connectivities"`.
+    min_jaccard: Edges with Jaccard similarity below this threshold
+        are pruned before clustering.  Useful to remove very weak
+        connections (default 0.0 keeps all edges).
+    resolution: Leiden resolution parameter.
+    n_iterations: Number of Leiden iterations.
+    beta: Leiden randomness parameter.
+    objective_function: `"modularity"` or `"CPM"`.
+    seed: Random seed passed to Leiden.
+    verbose: If True, print progress to stdout.
+    inplace: If True, persist updated AnnData to Zarr after
+        clustering.
+
+Returns:
+    Metadata dict stored under `adata.uns["clusterings"][cluster_key]`.
+
+##### `compare_groups(self, field: str, groupby, layer: str = 'X', comparisons: str | list[tuple[str, str]] | None = 'all', method: str = 'ttest', equal_var: bool = True, order: list[str] | None = None, multitest: str | None = 'bh') -> pd.DataFrame`
+
+Compute pairwise group comparisons for a marker or numeric obs field.
+
+Args:
+    field: Marker name (in `adata.var_names`) or numeric obs column.
+    groupby: Single obs column or list of obs columns for composite grouping.
+    layer: Layer used when `field` is a marker (default `X`).
+    comparisons: `"all"` (default), `"adjacent"`, explicit list of
+        (group_a, group_b) pairs, or None to skip comparisons.
+    method: `"ttest"` or `"wald"`.
+    equal_var: When method is `"ttest"`, use pooled variance (True)
+        or Welch correction (False).
+    order: Optional explicit group order; otherwise sorted unique groups.
+    multitest: Optional p-value correction (`"bh"` or `"bonferroni"`).
+
+Returns:
+    DataFrame with columns:
+        group_a, group_b, n_a, n_b, mean_a, mean_b, var_a, var_b,
+        stat, p_value, p_adj, method
+
 ##### `compute_umap(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, knn_method: str = 'brute', verbose: bool = False, module_name: str = 'mlx_umap', inplace: bool = True) -> dict[str, Any]`
 
 Compute UMAP embedding from selected markers using mlx-umap.
@@ -123,7 +180,7 @@ Returns:
       - obs: copied run obs
       - obsm: selected embedding (if available)
 
-##### `plot_boxplot(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'holm', show_points: bool = False, show_outliers: bool = True, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', significance_thresholds: list[tuple[float, str]] | None = None, random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)`
+##### `plot_boxplot(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'bh', show_points: bool = False, show_outliers: bool = True, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', significance_thresholds: list[tuple[float, str]] | None = None, random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)`
 
 Boxplot for a single field grouped by an obs column, with significance brackets.
 
@@ -142,7 +199,7 @@ Args:
         - `"adjacent"`: only neighbours in `order`.
         - List of `(group_a, group_b)` tuples for explicit pairs.
     test: `"mannwhitney"` (default), `"ttest"`, or `"welch"`.
-    multitest: `None`, `"holm"`, or `"bonferroni"`.
+    multitest: `None`, `"bh"`, or `"bonferroni"`.
     show_points: Overlay a stripplot of per-cell points (subsampled).
     show_outliers: Whether to render boxplot outlier markers
         (maps to seaborn's `showfliers`). Defaults to True. Set to

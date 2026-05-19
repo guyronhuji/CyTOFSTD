@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-18T17:09:42.407131+00:00",
+  "generated_at": "2026-05-19T03:48:12.807046+00:00",
   "generator": "scripts/generate_api_docs.py",
   "package": "cytofstandard",
   "module_count": 13,
@@ -394,6 +394,18 @@
               "decorators": []
             },
             {
+              "name": "cluster_leiden_jaccard",
+              "signature": "(self, embedding_name: str, cluster_key: str | None = None, jaccard_connectivities_key: str | None = None, min_jaccard: float = 0.0, resolution: float = 1.0, n_iterations: int = 2, beta: float = 0.01, objective_function: str = 'modularity', seed: int = 42, verbose: bool = False, inplace: bool = True) -> dict[str, Any]",
+              "summary": "Cluster cells using a PhenoGraph-style Jaccard graph with Leiden.",
+              "decorators": []
+            },
+            {
+              "name": "compare_groups",
+              "signature": "(self, field: str, groupby, layer: str = 'X', comparisons: str | list[tuple[str, str]] | None = 'all', method: str = 'ttest', equal_var: bool = True, order: list[str] | None = None, multitest: str | None = 'bh') -> pd.DataFrame",
+              "summary": "Compute pairwise group comparisons for a marker or numeric obs field.",
+              "decorators": []
+            },
+            {
               "name": "compute_umap",
               "signature": "(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, knn_method: str = 'brute', verbose: bool = False, module_name: str = 'mlx_umap', inplace: bool = True) -> dict[str, Any]",
               "summary": "Compute UMAP embedding from selected markers using mlx-umap.",
@@ -437,7 +449,7 @@
             },
             {
               "name": "plot_boxplot",
-              "signature": "(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'holm', show_points: bool = False, show_outliers: bool = True, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', significance_thresholds: list[tuple[float, str]] | None = None, random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)",
+              "signature": "(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'bh', show_points: bool = False, show_outliers: bool = True, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', significance_thresholds: list[tuple[float, str]] | None = None, random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)",
               "summary": "Boxplot for a single field grouped by an obs column, with significance brackets.",
               "decorators": []
             },

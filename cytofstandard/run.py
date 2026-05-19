@@ -1753,12 +1753,28 @@ class Run:
                 "pabs": pabs_key if "pabs" in score_block else None,
             }
 
+        def _store_z_to_obs(obs_prefix: str, score_block: dict[str, pd.DataFrame]) -> list[str]:
+            z_df = score_block["z"].loc[adata.obs_names]
+            col_prefix = f"{obs_prefix}_"
+            existing = [col for col in adata.obs.columns if col.startswith(col_prefix)]
+            if existing:
+                adata.obs = adata.obs.drop(columns=existing)
+            obs_cols = []
+            for col in z_df.columns:
+                col_name = f"{col_prefix}{col}"
+                adata.obs[col_name] = z_df[col].to_numpy(dtype=np.float32, copy=True)
+                obs_cols.append(col_name)
+            return obs_cols
+
         result_keys_smoothed = _store_score_block(result_prefix, smoothed_scores)
         result_keys_raw = (
             _store_score_block(f"{result_prefix}_raw", raw_scores)
             if raw_scores is not None
             else None
         )
+        _store_z_to_obs("PC", smoothed_scores)
+        if raw_scores is not None:
+            _store_z_to_obs("PC_R", raw_scores)
 
         permcell_uns = self._upsert_nested_uns_dict(adata, "permcell")
         permcell_uns[result_prefix] = {
@@ -2262,6 +2278,148 @@ class Run:
         fig.tight_layout()
         return fig, ax
 
+    def compare_groups(
+        self,
+        field: str,
+        groupby,
+        layer: str = "X",
+        comparisons: str | list[tuple[str, str]] | None = "all",
+        method: str = "ttest",
+        equal_var: bool = True,
+        order: list[str] | None = None,
+        multitest: str | None = "bh",
+    ) -> pd.DataFrame:
+        """Compute pairwise group comparisons for a marker or numeric obs field.
+
+        Args:
+            field: Marker name (in `adata.var_names`) or numeric obs column.
+            groupby: Single obs column or list of obs columns for composite grouping.
+            layer: Layer used when `field` is a marker (default `X`).
+            comparisons: `"all"` (default), `"adjacent"`, explicit list of
+                (group_a, group_b) pairs, or None to skip comparisons.
+            method: `"ttest"` or `"wald"`.
+            equal_var: When method is `"ttest"`, use pooled variance (True)
+                or Welch correction (False).
+            order: Optional explicit group order; otherwise sorted unique groups.
+            multitest: Optional p-value correction (`"bh"` or `"bonferroni"`).
+
+        Returns:
+            DataFrame with columns:
+                group_a, group_b, n_a, n_b, mean_a, mean_b, var_a, var_b,
+                stat, p_value, p_adj, method
+        """
+        if method not in {"ttest", "wald"}:
+            raise ValueError("method must be 'ttest' or 'wald'")
+        if multitest not in {None, "bh", "bonferroni"}:
+            raise ValueError("multitest must be None, 'bh', or 'bonferroni'")
+
+        adata = self.read_adata()
+        values, _ = self._resolve_field_values(adata, field, layer)
+        group_series = self._resolve_groupby_series(adata, groupby).reset_index(drop=True)
+
+        plot_df = pd.DataFrame(
+            {
+                field: values,
+                "__group__": group_series.values,
+            }
+        ).dropna(subset=[field, "__group__"])
+
+        if order is None:
+            order = sorted(plot_df["__group__"].unique().tolist())
+        else:
+            missing = [g for g in order if g not in plot_df["__group__"].unique()]
+            if missing:
+                raise ValueError(f"order contains unknown groups: {missing}")
+
+        plot_df = plot_df[plot_df["__group__"].isin(order)]
+        plot_df["__group__"] = pd.Categorical(
+            plot_df["__group__"], categories=order, ordered=True
+        )
+
+        pairs = self._build_comparison_pairs(order, comparisons)
+        if not pairs:
+            return pd.DataFrame(
+                columns=[
+                    "group_a",
+                    "group_b",
+                    "n_a",
+                    "n_b",
+                    "mean_a",
+                    "mean_b",
+                    "var_a",
+                    "var_b",
+                    "stat",
+                    "p_value",
+                    "p_adj",
+                    "method",
+                ]
+            )
+
+        try:
+            from scipy import stats
+        except ImportError as exc:
+            raise ImportError(
+                "compare_groups requires scipy. Install with: pip install scipy"
+            ) from exc
+
+        results = []
+        pvals = []
+        for a, b in pairs:
+            x = plot_df.loc[plot_df["__group__"] == a, field].to_numpy(dtype=float)
+            y = plot_df.loc[plot_df["__group__"] == b, field].to_numpy(dtype=float)
+            x = x[~np.isnan(x)]
+            y = y[~np.isnan(y)]
+
+            n_a = int(len(x))
+            n_b = int(len(y))
+            mean_a = float(np.mean(x)) if n_a > 0 else float("nan")
+            mean_b = float(np.mean(y)) if n_b > 0 else float("nan")
+            var_a = float(np.var(x, ddof=1)) if n_a > 1 else float("nan")
+            var_b = float(np.var(y, ddof=1)) if n_b > 1 else float("nan")
+
+            stat = float("nan")
+            p_value = float("nan")
+
+            if n_a >= 2 and n_b >= 2:
+                if method == "ttest":
+                    stat, p_value = stats.ttest_ind(x, y, equal_var=equal_var)
+                    stat = float(stat)
+                    p_value = float(p_value)
+                else:
+                    # Wald z-test on difference of means
+                    se = np.sqrt(var_a / n_a + var_b / n_b)
+                    if se > 0 and np.isfinite(se):
+                        stat = float((mean_a - mean_b) / se)
+                        p_value = float(2.0 * stats.norm.sf(abs(stat)))
+
+            results.append(
+                {
+                    "group_a": a,
+                    "group_b": b,
+                    "n_a": n_a,
+                    "n_b": n_b,
+                    "mean_a": mean_a,
+                    "mean_b": mean_b,
+                    "var_a": var_a,
+                    "var_b": var_b,
+                    "stat": stat,
+                    "p_value": p_value,
+                    "method": method,
+                }
+            )
+            pvals.append(p_value)
+
+        p_adj = None
+        if multitest is not None:
+            p_adj = self._adjust_pvalues(pvals, method=multitest)
+
+        out = pd.DataFrame(results)
+        if p_adj is not None:
+            out["p_adj"] = p_adj
+        else:
+            out["p_adj"] = np.nan
+        return out
+
     def plot_boxplot(
         self,
         field: str,
@@ -2270,7 +2428,7 @@ class Run:
         order: list[str] | None = None,
         comparisons=None,
         test: str = "mannwhitney",
-        multitest: str | None = "holm",
+        multitest: str | None = "bh",
         show_points: bool = False,
         show_outliers: bool = True,
         max_points: int = 2000,
@@ -2305,7 +2463,7 @@ class Run:
                 - `"adjacent"`: only neighbours in `order`.
                 - List of `(group_a, group_b)` tuples for explicit pairs.
             test: `"mannwhitney"` (default), `"ttest"`, or `"welch"`.
-            multitest: `None`, `"holm"`, or `"bonferroni"`.
+            multitest: `None`, `"bh"`, or `"bonferroni"`.
             show_points: Overlay a stripplot of per-cell points (subsampled).
             show_outliers: Whether to render boxplot outlier markers
                 (maps to seaborn's `showfliers`). Defaults to True. Set to
@@ -2344,8 +2502,8 @@ class Run:
         """
         if test not in {"mannwhitney", "ttest", "welch"}:
             raise ValueError("test must be 'mannwhitney', 'ttest', or 'welch'")
-        if multitest not in {None, "holm", "bonferroni"}:
-            raise ValueError("multitest must be None, 'holm', or 'bonferroni'")
+        if multitest not in {None, "bh", "bonferroni"}:
+            raise ValueError("multitest must be None, 'bh', or 'bonferroni'")
 
         try:
             import matplotlib.pyplot as plt
@@ -2542,8 +2700,8 @@ class Run:
         return pvals
 
     @staticmethod
-    def _adjust_pvalues(pvalues, method="holm"):
-        """Apply Holm or Bonferroni correction across pairwise p-values."""
+    def _adjust_pvalues(pvalues, method="bh"):
+        """Apply BH-FDR or Bonferroni correction across pairwise p-values."""
         pvals = np.asarray(pvalues, dtype=float)
         valid_mask = ~np.isnan(pvals)
         n_valid = int(valid_mask.sum())
@@ -2555,17 +2713,18 @@ class Run:
             adjusted[valid_mask] = np.minimum(pvals[valid_mask] * n_valid, 1.0)
             return adjusted.tolist()
 
-        if method == "holm":
+        if method == "bh":
             adjusted = pvals.copy()
             valid_idx = np.where(valid_mask)[0]
             order_local = np.argsort(pvals[valid_idx])
-            running_max = 0.0
-            for rank, local_idx in enumerate(order_local):
-                orig = valid_idx[local_idx]
-                value = pvals[orig] * (n_valid - rank)
-                value = min(value, 1.0)
-                running_max = max(running_max, value)
-                adjusted[orig] = running_max
+            sorted_idx = valid_idx[order_local]
+            ranks = np.arange(1, n_valid + 1, dtype=float)
+            sorted_p = pvals[sorted_idx]
+            bh_vals = sorted_p * n_valid / ranks
+            bh_vals = np.minimum(bh_vals, 1.0)
+            # Enforce monotonicity from largest to smallest
+            bh_vals = np.minimum.accumulate(bh_vals[::-1])[::-1]
+            adjusted[sorted_idx] = bh_vals
             return adjusted.tolist()
 
         raise ValueError(f"Unknown method: {method}")
