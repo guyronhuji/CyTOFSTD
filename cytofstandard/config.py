@@ -1,7 +1,7 @@
 """Configuration for cytofstandard."""
 
 # Package version
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Default FCS reader to use
 DEFAULT_FCS_READER = "fcsparser"

@@ -160,7 +160,7 @@ class Project:
             "project_id": project_id,
             "project_name": project_name,
             "created_at": datetime.utcnow().isoformat(),
-            "package_version": "0.1.0",
+            "package_version": "0.1.1",
             "storage_format": "anndata_zarr",
             "cell_uuid_strategy": "uuid5_project_run_filehash_eventindex",
             "standard_marker_file": "metadata/standard_markers.parquet",

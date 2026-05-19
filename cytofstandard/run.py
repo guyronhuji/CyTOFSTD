@@ -459,7 +459,7 @@ class Run:
         }
         adata.uns["ingestion"] = {
             "created_at": datetime.utcnow().isoformat(),
-            "package_version": "0.1.0",
+            "package_version": "0.1.1",
             "strict_markers": strict_markers,
             "common_markers_only": common_markers_only,
             "drop_columns": drop_columns,
