@@ -91,6 +91,17 @@ Compute UMAP embedding from selected markers using mlx-umap.
 Also computes/stores KNN and graph artifacts required for downstream Leiden.
 Existing artifacts with the same `embedding_name` are overwritten.
 
+##### `compute_umap_balanced(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', groupby_col: str = 'sample_id', n_per_group: int | None = None, replace: bool = False, n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, knn_method: str = 'brute', verbose: bool = False, module_name: str = 'mlx_umap', inplace: bool = True) -> dict[str, Any]`
+
+Compute UMAP with fit on balanced subsample, then transform all cells.
+
+The balanced subsample is defined by `groupby_col`, using `n_per_group`
+cells per group (or the smallest group size if None). The UMAP model
+is fit on the subsample, then used to transform all cells.
+
+KNN and graph artifacts are still computed for the full dataset to
+support downstream Leiden clustering.
+
 ##### `create_subset_run(self, new_run_id: str, sample_ids: list[str] | None = None, line_ids: list[str] | None = None, run_name: str | None = None, notes: str | None = None) -> 'Run'`
 
 Create a new run from a subset of samples and/or lines in this run.
@@ -105,7 +116,7 @@ Args:
 Returns:
     Newly created and persisted subset Run.
 
-##### `ingest(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, drop_columns: list[str] | None = None) -> None`
+##### `ingest(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, common_markers_only: bool = False, drop_columns: list[str] | None = None) -> None`
 
 Ingest files into this run.
 
@@ -115,6 +126,8 @@ Args:
     copy_raw: Whether to copy raw files to project
     strict_markers: Whether to fail on unknown markers
     allow_extra_markers: Whether to allow extra markers
+    common_markers_only: If True, drop markers that are not present in
+        all files for this run.
     drop_columns: Column names to remove before marker processing
 
 Raises:
@@ -381,6 +394,20 @@ Get the run status.
 
 Returns:
     Status string (registered, ingested, failed_ingestion)
+
+##### `subsample_by_group(self, groupby_col: str, n_per_group: int | None = None, random_state: int = 0, replace: bool = False) -> anndata.AnnData`
+
+Return a balanced subsample AnnData by group.
+
+Args:
+    groupby_col: Obs column to balance on.
+    n_per_group: Number of cells per group. If None, uses the
+        smallest group size.
+    random_state: RNG seed for sampling.
+    replace: Sample with replacement if True.
+
+Returns:
+    Subsampled AnnData copy.
 
 ##### `to_dataframe(self, fields: list[str], layer: str = 'X') -> pd.DataFrame`
 

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-19T04:00:36.172787+00:00",
+  "generated_at": "2026-05-19T05:13:25.422905+00:00",
   "generator": "scripts/generate_api_docs.py",
   "package": "cytofstandard",
   "module_count": 14,
@@ -428,6 +428,12 @@
               "decorators": []
             },
             {
+              "name": "compute_umap_balanced",
+              "signature": "(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', groupby_col: str = 'sample_id', n_per_group: int | None = None, replace: bool = False, n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, knn_method: str = 'brute', verbose: bool = False, module_name: str = 'mlx_umap', inplace: bool = True) -> dict[str, Any]",
+              "summary": "Compute UMAP with fit on balanced subsample, then transform all cells.",
+              "decorators": []
+            },
+            {
               "name": "create_subset_run",
               "signature": "(self, new_run_id: str, sample_ids: list[str] | None = None, line_ids: list[str] | None = None, run_name: str | None = None, notes: str | None = None) -> 'Run'",
               "summary": "Create a new run from a subset of samples and/or lines in this run.",
@@ -435,7 +441,7 @@
             },
             {
               "name": "ingest",
-              "signature": "(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, drop_columns: list[str] | None = None) -> None",
+              "signature": "(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, common_markers_only: bool = False, drop_columns: list[str] | None = None) -> None",
               "summary": "Ingest files into this run.",
               "decorators": []
             },
@@ -554,6 +560,12 @@
               "decorators": [
                 "property"
               ]
+            },
+            {
+              "name": "subsample_by_group",
+              "signature": "(self, groupby_col: str, n_per_group: int | None = None, random_state: int = 0, replace: bool = False) -> anndata.AnnData",
+              "summary": "Return a balanced subsample AnnData by group.",
+              "decorators": []
             },
             {
               "name": "to_dataframe",

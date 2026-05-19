@@ -582,6 +582,41 @@ class Run:
 
         return self._adata
 
+    def subsample_by_group(
+        self,
+        groupby_col: str,
+        n_per_group: int | None = None,
+        random_state: int = 0,
+        replace: bool = False,
+    ) -> anndata.AnnData:
+        """Return a balanced subsample AnnData by group.
+
+        Args:
+            groupby_col: Obs column to balance on.
+            n_per_group: Number of cells per group. If None, uses the
+                smallest group size.
+            random_state: RNG seed for sampling.
+            replace: Sample with replacement if True.
+
+        Returns:
+            Subsampled AnnData copy.
+        """
+        adata = self.read_adata()
+        if groupby_col not in adata.obs.columns:
+            raise ValueError(
+                f"groupby_col '{groupby_col}' not found in obs. "
+                f"Available columns: {adata.obs.columns.tolist()}"
+            )
+
+        groups = adata.obs[groupby_col]
+        idx, _, _ = self._balanced_group_indices(
+            groups,
+            n_per_group=n_per_group,
+            random_state=random_state,
+            replace=replace,
+        )
+        return adata[idx].copy()
+
     def to_dataframe(
         self,
         fields: list[str],
@@ -1163,6 +1198,215 @@ class Run:
                 "min_dist": float(min_dist),
                 "metric": str(metric),
                 "knn_method": str(knn_method),
+                "n_markers": int(len(markers)),
+                "n_cells": int(adata.n_obs),
+            },
+        )
+        if inplace:
+            self.save()
+
+        return metadata
+
+    def compute_umap_balanced(
+        self,
+        markers: list[str],
+        source_layer: str = "X",
+        embedding_name: str = "X_umap",
+        groupby_col: str = "sample_id",
+        n_per_group: int | None = None,
+        replace: bool = False,
+        n_neighbors: int = 15,
+        n_components: int = 2,
+        min_dist: float = 0.1,
+        metric: str = "euclidean",
+        random_state: int = 42,
+        knn_method: str = "brute",
+        verbose: bool = False,
+        module_name: str = "mlx_umap",
+        inplace: bool = True,
+    ) -> dict[str, Any]:
+        """Compute UMAP with fit on balanced subsample, then transform all cells.
+
+        The balanced subsample is defined by `groupby_col`, using `n_per_group`
+        cells per group (or the smallest group size if None). The UMAP model
+        is fit on the subsample, then used to transform all cells.
+
+        KNN and graph artifacts are still computed for the full dataset to
+        support downstream Leiden clustering.
+        """
+        import inspect as _inspect
+        import time as _time
+
+        if not markers:
+            raise ValueError("markers cannot be empty")
+        if n_neighbors <= 1:
+            raise ValueError("n_neighbors must be > 1")
+        if n_components <= 0:
+            raise ValueError("n_components must be > 0")
+
+        adata = self.read_adata()
+        if groupby_col not in adata.obs.columns:
+            raise ValueError(
+                f"groupby_col '{groupby_col}' not found in obs. "
+                f"Available columns: {adata.obs.columns.tolist()}"
+            )
+
+        umap_module, knn_module = self._load_mlx_umap_modules(module_name)
+
+        matrix = self._matrix_from_layer(adata, source_layer)
+        var_names = adata.var_names.astype(str).tolist()
+        marker_to_idx = {name: i for i, name in enumerate(var_names)}
+
+        missing = [marker for marker in markers if marker not in marker_to_idx]
+        if missing:
+            raise ValueError(f"Markers not found for embedding: {missing}")
+
+        marker_idx = [marker_to_idx[marker] for marker in markers]
+        x_embed = np.asarray(matrix[:, marker_idx], dtype=np.float32)
+
+        self._clear_embedding_artifacts(adata, embedding_name)
+
+        group_series = adata.obs[groupby_col]
+        fit_idx, counts, target_n = self._balanced_group_indices(
+            group_series,
+            n_per_group=n_per_group,
+            random_state=random_state,
+            replace=replace,
+        )
+
+        if verbose:
+            print(
+                f"[compute_umap_balanced] embedding='{embedding_name}' layer='{source_layer}' "
+                f"cells={adata.n_obs} markers={len(markers)} groups={len(counts)} "
+                f"n_per_group={target_n}"
+            )
+
+        umap_kwargs = {
+            "n_components": n_components,
+            "n_neighbors": n_neighbors,
+            "min_dist": min_dist,
+            "metric": metric,
+            "random_state": random_state,
+            "knn_method": knn_method,
+        }
+        try:
+            params = _inspect.signature(umap_module.UMAP).parameters
+            if "verbose" in params:
+                umap_kwargs["verbose"] = verbose
+        except (TypeError, ValueError):
+            pass
+
+        umap_model = umap_module.UMAP(**umap_kwargs)
+        if not hasattr(umap_model, "fit") or not hasattr(umap_model, "transform"):
+            raise ImportError(
+                "compute_umap_balanced requires UMAP with fit() and transform()"
+            )
+
+        t0 = _time.perf_counter()
+        umap_model.fit(x_embed[fit_idx])
+        embedding = np.asarray(umap_model.transform(x_embed), dtype=np.float32)
+        umap_sec = float(_time.perf_counter() - t0)
+
+        t1 = _time.perf_counter()
+        knn_idx, knn_dist = knn_module.compute_knn(
+            x_embed,
+            n_neighbors,
+            method=knn_method,
+            random_state=random_state,
+            verbose=verbose,
+        )
+        knn_idx = np.asarray(knn_idx, dtype=np.int32)
+        knn_dist = np.asarray(knn_dist, dtype=np.float32)
+        knn_sec = float(_time.perf_counter() - t1)
+
+        uu, vv, weights, dists, sigma = self._knn_to_graph_arrays(
+            knn_idx,
+            knn_dist,
+            adata.n_obs,
+        )
+
+        try:
+            from scipy import sparse as sp
+        except ImportError as exc:
+            raise ImportError(
+                "compute_umap_balanced requires scipy for sparse graph storage"
+            ) from exc
+
+        edge_u = np.concatenate([uu, vv])
+        edge_v = np.concatenate([vv, uu])
+        conn_vals = np.concatenate([weights, weights]).astype(np.float32)
+        dist_vals = np.concatenate([dists, dists]).astype(np.float32)
+
+        connectivities = sp.csr_matrix(
+            (conn_vals, (edge_u, edge_v)),
+            shape=(adata.n_obs, adata.n_obs),
+            dtype=np.float32,
+        )
+        distances = sp.csr_matrix(
+            (dist_vals, (edge_u, edge_v)),
+            shape=(adata.n_obs, adata.n_obs),
+            dtype=np.float32,
+        )
+
+        embedding_key = embedding_name
+        knn_indices_key = f"{embedding_name}_knn_indices"
+        knn_distances_key = f"{embedding_name}_knn_distances"
+        connectivities_key = f"{embedding_name}_connectivities"
+        distances_key = f"{embedding_name}_distances"
+
+        adata.obsm[embedding_key] = embedding
+        adata.obsm[knn_indices_key] = knn_idx
+        adata.obsm[knn_distances_key] = knn_dist
+        adata.obsp[connectivities_key] = connectivities
+        adata.obsp[distances_key] = distances
+
+        embeddings_uns = self._upsert_nested_uns_dict(adata, "embeddings")
+        metadata = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "method": "mlx_umap_balanced",
+            "module": module_name,
+            "verbose": bool(verbose),
+            "source_layer": source_layer,
+            "markers": list(markers),
+            "n_neighbors": int(n_neighbors),
+            "n_components": int(n_components),
+            "min_dist": float(min_dist),
+            "metric": str(metric),
+            "random_state": int(random_state),
+            "knn_method": str(knn_method),
+            "sigma": float(sigma),
+            "embedding_key": embedding_key,
+            "knn_indices_key": knn_indices_key,
+            "knn_distances_key": knn_distances_key,
+            "connectivities_key": connectivities_key,
+            "distances_key": distances_key,
+            "n_cells": int(adata.n_obs),
+            "n_markers": int(len(markers)),
+            "umap_sec": umap_sec,
+            "knn_sec": knn_sec,
+            "balanced_groupby_col": groupby_col,
+            "balanced_n_per_group": int(target_n),
+            "balanced_group_counts": counts,
+            "balanced_n_groups": int(len(counts)),
+            "balanced_n_cells": int(len(fit_idx)),
+        }
+        embeddings_uns[embedding_name] = metadata
+
+        if verbose:
+            print(
+                f"[compute_umap_balanced] done embedding='{embedding_name}' "
+                f"umap_sec={umap_sec:.3f} knn_sec={knn_sec:.3f}"
+            )
+
+        self._adata = adata
+        self._log_run_event(
+            "umap_balanced_computed",
+            {
+                "embedding_name": embedding_name,
+                "source_layer": source_layer,
+                "groupby_col": groupby_col,
+                "n_per_group": int(target_n),
+                "n_groups": int(len(counts)),
                 "n_markers": int(len(markers)),
                 "n_cells": int(adata.n_obs),
             },
@@ -3292,6 +3536,48 @@ class Run:
                 selected.append(group_idx)
             else:
                 selected.append(rng.choice(group_idx, size=target_n, replace=False))
+
+        return np.concatenate(selected), count_dict, target_n
+
+    @staticmethod
+    def _balanced_group_indices(
+        groups: pd.Series,
+        n_per_group: int | None = None,
+        random_state: int = 0,
+        replace: bool = False,
+    ) -> tuple[np.ndarray, dict[str, int], int]:
+        """Return balanced per-group indices with optional target size."""
+        group_series = groups.astype(str)
+        counts = group_series.value_counts().sort_index()
+        if counts.empty:
+            raise ValueError("group_series is empty")
+
+        count_dict = {str(group): int(count) for group, count in counts.items()}
+        min_count = int(counts.min())
+
+        if n_per_group is None:
+            target_n = min_count
+        else:
+            target_n = int(n_per_group)
+            if target_n <= 0:
+                raise ValueError("n_per_group must be > 0")
+            if not replace and target_n > min_count:
+                raise ValueError(
+                    "n_per_group exceeds smallest group size. "
+                    "Set replace=True or omit n_per_group to use the minimum."
+                )
+
+        rng = np.random.default_rng(random_state)
+        selected: list[np.ndarray] = []
+
+        for group in sorted(count_dict.keys()):
+            group_idx = np.where(group_series.values == group)[0]
+            if len(group_idx) == target_n and not replace:
+                selected.append(group_idx)
+            else:
+                selected.append(
+                    rng.choice(group_idx, size=target_n, replace=replace)
+                )
 
         return np.concatenate(selected), count_dict, target_n
 

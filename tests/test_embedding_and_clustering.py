@@ -16,12 +16,22 @@ def _install_fake_mlx_umap(monkeypatch):
     class FakeUMAP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            self.fit_shape = None
 
-        def fit_transform(self, x):
+        def fit(self, x):
+            x = np.asarray(x, dtype=np.float32)
+            self.fit_shape = x.shape
+            return self
+
+        def transform(self, x):
             x = np.asarray(x, dtype=np.float32)
             if x.shape[1] == 1:
                 return np.concatenate([x, x], axis=1)
             return x[:, :2]
+
+        def fit_transform(self, x):
+            self.fit(x)
+            return self.transform(x)
 
     def compute_knn(x, k, method="brute", random_state=42, verbose=False):
         x = np.asarray(x, dtype=np.float32)
@@ -187,6 +197,46 @@ def test_compute_umap_overwrites_same_name(
     assert adata.uns["embeddings"]["my_umap"]["n_neighbors"] == 7
     assert adata.uns["embeddings"]["my_umap"]["markers"] == ["H3", "H3K27me3"]
     assert meta2["n_neighbors"] == 7
+
+
+def test_subsample_by_group_balances_counts(
+    temp_dir, example_standard_markers_path, example_marker_aliases_path
+):
+    run = _build_ingested_run(
+        temp_dir, example_standard_markers_path, example_marker_aliases_path
+    )
+    subset = run.subsample_by_group("sample_id", n_per_group=1, random_state=0)
+    counts = subset.obs["sample_id"].value_counts().to_dict()
+    assert counts["S001"] == 1
+    assert counts["S002"] == 1
+
+
+def test_compute_umap_balanced_stores_embedding(
+    temp_dir,
+    example_standard_markers_path,
+    example_marker_aliases_path,
+    monkeypatch,
+):
+    _install_fake_mlx_umap(monkeypatch)
+    run = _build_ingested_run(
+        temp_dir, example_standard_markers_path, example_marker_aliases_path
+    )
+
+    meta = run.compute_umap_balanced(
+        markers=["H3", "ECad"],
+        source_layer="raw",
+        embedding_name="balanced_umap",
+        groupby_col="sample_id",
+        n_per_group=1,
+        module_name="fake_mlx_umap",
+    )
+
+    adata = run.read_adata()
+    assert "balanced_umap" in adata.obsm
+    assert "balanced_umap_connectivities" in adata.obsp
+    assert meta["balanced_n_per_group"] == 1
+    assert meta["balanced_groupby_col"] == "sample_id"
+    assert meta["balanced_n_cells"] == 2
 
 
 def test_cluster_leiden_from_embedding(
