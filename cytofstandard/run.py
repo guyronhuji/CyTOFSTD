@@ -40,7 +40,7 @@ from cytofstandard.validation import (
     validate_sample_metadata,
     validate_marker_consistency,
 )
-from cytofstandard.io import read_fcs, read_csv
+from cytofstandard.io import read_fcs, read_csv, read_parquet
 from cytofstandard.provenance import (
     ProvenanceLogger,
     log_ingestion_started,
@@ -181,6 +181,8 @@ class Run:
                 data_df, marker_metadata = read_fcs(stored_path)
             elif src_path.suffix.lower() == ".csv":
                 data_df, marker_metadata = read_csv(stored_path)
+            elif src_path.suffix.lower() == ".parquet":
+                data_df, marker_metadata = read_parquet(stored_path)
             else:
                 raise ValueError(f"Unsupported file format: {src_path.suffix}")
 

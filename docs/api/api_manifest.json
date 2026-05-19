@@ -1,8 +1,8 @@
 {
-  "generated_at": "2026-05-19T03:48:12.807046+00:00",
+  "generated_at": "2026-05-19T04:00:36.172787+00:00",
   "generator": "scripts/generate_api_docs.py",
   "package": "cytofstandard",
-  "module_count": 13,
+  "module_count": 14,
   "modules": [
     {
       "module": "cytofstandard",
@@ -137,7 +137,8 @@
       "summary": "Input/output adapters for file formats.",
       "exports": [
         "read_fcs",
-        "read_csv"
+        "read_csv",
+        "read_parquet"
       ],
       "functions": [],
       "classes": []
@@ -167,6 +168,21 @@
           "name": "read_fcs",
           "signature": "(file_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]",
           "summary": "Read an FCS file and return data and marker metadata.",
+          "decorators": []
+        }
+      ],
+      "classes": []
+    },
+    {
+      "module": "cytofstandard.io.parquet",
+      "file_path": "cytofstandard/io/parquet.py",
+      "summary": "Parquet file reader for cytofstandard.",
+      "exports": [],
+      "functions": [
+        {
+          "name": "read_parquet",
+          "signature": "(file_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]",
+          "summary": "Read a Parquet file and return data and marker metadata.",
           "decorators": []
         }
       ],

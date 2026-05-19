@@ -2,7 +2,7 @@
 
 Auto-generated from source code. Do not edit these files by hand.
 
-- Generated at: `2026-05-19T03:48:12.807046+00:00`
+- Generated at: `2026-05-19T04:00:36.172787+00:00`
 - Generator: `scripts/generate_api_docs.py`
 
 ## Modules
@@ -15,6 +15,7 @@ Auto-generated from source code. Do not edit these files by hand.
 | [`cytofstandard.io`](reference/cytofstandard_io.md) | Input/output adapters for file formats. | 0 | 0 |
 | [`cytofstandard.io.csv`](reference/cytofstandard_io_csv.md) | CSV file reader for cytofstandard. | 0 | 1 |
 | [`cytofstandard.io.fcs`](reference/cytofstandard_io_fcs.md) | FCS file reader for cytofstandard. | 0 | 1 |
+| [`cytofstandard.io.parquet`](reference/cytofstandard_io_parquet.md) | Parquet file reader for cytofstandard. | 0 | 1 |
 | [`cytofstandard.markers`](reference/cytofstandard_markers.md) | Marker registry for standardizing marker names. | 1 | 0 |
 | [`cytofstandard.project`](reference/cytofstandard_project.md) | Project class for cytofstandard. | 1 | 0 |
 | [`cytofstandard.provenance`](reference/cytofstandard_provenance.md) | Provenance logging utilities for cytofstandard. | 1 | 10 |

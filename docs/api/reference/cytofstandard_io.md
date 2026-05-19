@@ -8,6 +8,7 @@ Input/output adapters for file formats.
 
 - `read_fcs`
 - `read_csv`
+- `read_parquet`
 
 ## Top-level Functions
 
