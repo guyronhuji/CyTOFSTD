@@ -119,7 +119,17 @@ summary = run.normalize_with_cytof_transform(
 )
 ```
 
-## 9) Embedding and clustering
+## 9) Z-score normalization (balanced)
+
+```python
+run.zscore_markers_balanced(
+    source_layer="normalized",
+    output_layer="normalized_z",
+    groupby_col="sample_id",
+)
+```
+
+## 10) Embedding and clustering
 
 ```python
 run.set_x_from_layer("normalized")
@@ -145,7 +155,7 @@ run.cluster_leiden_jaccard(
 )
 ```
 
-## 10) PermCell
+## 11) PermCell
 
 ```python
 import PermCell_Smooth as PCS
@@ -168,7 +178,7 @@ run.run_permcell(
 #   PC_R_<signature> (raw)
 ```
 
-## 11) Plotting and statistics
+## 12) Plotting and statistics
 
 Heatmap of markers or obs fields by group:
 
@@ -205,20 +215,20 @@ table = run.compare_groups(
 )
 ```
 
-## 12) Export for downstream analysis
+## 13) Export for downstream analysis
 
 ```python
 df = run.to_dataframe(fields=["H3", "H3K27me3", "sample_id"], layer="raw")
 ```
 
-## 13) Locking and reproducibility
+## 14) Locking and reproducibility
 
 ```python
 run.lock_zarr_parts(parts=["layers/raw", "obs"])
 run.unlock_zarr_parts(parts=["layers/raw", "obs"])
 ```
 
-## 14) Common issues
+## 15) Common issues
 
 - **Missing markers**: set `allow_extra_markers=True` or update
   `marker_aliases.yaml` to map alternate names.
