@@ -4,7 +4,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional
 
-from cytofstandard.exceptions import MetadataValidationError
+from cytofstandard.exceptions import MetadataValidationError, MarkerValidationError
 
 
 def validate_file_list(
