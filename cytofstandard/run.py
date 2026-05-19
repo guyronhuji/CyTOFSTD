@@ -90,6 +90,7 @@ class Run:
         copy_raw: bool = True,
         strict_markers: bool = True,
         allow_extra_markers: bool = False,
+        common_markers_only: bool = False,
         drop_columns: list[str] | None = None,
     ) -> None:
         """Ingest files into this run.
@@ -100,6 +101,8 @@ class Run:
             copy_raw: Whether to copy raw files to project
             strict_markers: Whether to fail on unknown markers
             allow_extra_markers: Whether to allow extra markers
+            common_markers_only: If True, drop markers that are not present in
+                all files for this run.
             drop_columns: Column names to remove before marker processing
 
         Raises:
@@ -120,6 +123,7 @@ class Run:
                 "n_files": int(len(files)),
                 "strict_markers": bool(strict_markers),
                 "allow_extra_markers": bool(allow_extra_markers),
+                "common_markers_only": bool(common_markers_only),
                 "drop_columns": list(drop_columns or []),
             },
         )
@@ -343,6 +347,12 @@ class Run:
         non_marker_cols = set(obs_cols) | optional_field_cols | set(csv_meta_cols_list)
 
         marker_cols = [c for c in combined.columns if c not in non_marker_cols]
+        if common_markers_only:
+            marker_cols = [c for c in marker_cols if c in common_markers]
+            if not marker_cols:
+                raise IngestionError(
+                    "No common markers found across files after applying common_markers_only=True."
+                )
         X = combined[marker_cols].values.astype(np.float32)
 
         # Create obs DataFrame
@@ -451,6 +461,7 @@ class Run:
             "created_at": datetime.utcnow().isoformat(),
             "package_version": "0.1.0",
             "strict_markers": strict_markers,
+            "common_markers_only": common_markers_only,
             "drop_columns": drop_columns,
             "n_files": len(files),
             "n_cells": len(adata),

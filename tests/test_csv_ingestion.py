@@ -308,6 +308,37 @@ def test_run_marker_variables_populated_after_ingestion(
     assert "histone" in run.markers_by_class
 
 
+def test_ingestion_common_markers_only_drops_missing(
+    temp_dir, csv_project, sample_metadata_file
+):
+    """common_markers_only keeps only markers present in all files."""
+    run = csv_project.add_run(run_id="run_001")
+
+    file_a = temp_dir / "sample_A.csv"
+    file_a.write_text("H3,ECad\n100,300\n150,350\n")
+    file_b = temp_dir / "sample_B.csv"
+    file_b.write_text("H3,H3K27me3\n200,400\n250,450\n")
+
+    sample_meta = temp_dir / "sample_metadata.csv"
+    sample_meta.write_text(
+        "file_name,sample_id,line_id\n"
+        f"{file_a.name},S001,MCF7\n"
+        f"{file_b.name},S002,T47D\n"
+    )
+
+    run.ingest(
+        files=[str(file_a), str(file_b)],
+        sample_metadata=str(sample_meta),
+        copy_raw=False,
+        strict_markers=False,
+        common_markers_only=True,
+    )
+
+    adata = run.read_adata()
+    assert adata.var_names.tolist() == ["H3"]
+    assert adata.uns["ingestion"]["common_markers_only"] is True
+
+
 def test_run_uses_intra_extra_column_for_marker_partition(
     temp_dir, example_marker_aliases_path
 ):
