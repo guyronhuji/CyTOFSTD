@@ -55,7 +55,7 @@ def test_project_load_with_validation_disabled(temp_dir):
 project_id: TEST_005
 project_name: Test Project
 created_at: "2026-05-15T12:00:00"
-package_version: "0.1.1"
+package_version: "0.1.2"
 storage_format: "anndata_zarr"
 cell_uuid_strategy: "uuid5_project_run_filehash_eventindex"
 standard_marker_file: "metadata/standard_markers.parquet"

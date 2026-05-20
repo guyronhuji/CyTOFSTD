@@ -2,6 +2,7 @@
 
 import types
 
+import anndata
 import numpy as np
 import pandas as pd
 
@@ -80,6 +81,74 @@ def _install_fake_igraph(monkeypatch):
 
     fake_igraph.Graph = FakeGraph
     monkeypatch.setitem(__import__("sys").modules, "igraph", fake_igraph)
+
+
+def _install_fake_flowsom(monkeypatch):
+    """Install fake flowsom package modules for compute_flowsom tests."""
+    fake_flowsom = types.ModuleType("flowsom")
+    fake_models = types.ModuleType("flowsom.models")
+
+    class FakeBatchFlowSOMEstimator:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeFlowSOMEstimator:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeFlowSOM:
+        def __init__(
+            self,
+            inp,
+            n_clusters,
+            cols_to_use=None,
+            model=None,
+            xdim=10,
+            ydim=10,
+            **kwargs,
+        ):
+            n_cells = inp.n_obs
+            markers = list(cols_to_use or inp.var_names.tolist())
+            n_markers = len(markers)
+            n_nodes = int(xdim) * int(ydim)
+
+            clustering = np.arange(n_cells, dtype=np.int32) % n_nodes
+            metaclustering = clustering % max(1, int(n_clusters))
+            cell_obs = pd.DataFrame(
+                {
+                    "clustering": clustering,
+                    "metaclustering": metaclustering,
+                },
+                index=inp.obs_names,
+            )
+            cell_data = anndata.AnnData(
+                X=np.asarray(inp.X, dtype=np.float32),
+                obs=cell_obs,
+                var=pd.DataFrame(index=markers),
+            )
+
+            codes = np.arange(n_nodes * n_markers, dtype=np.float32).reshape(
+                n_nodes, n_markers
+            )
+            cluster_data = anndata.AnnData(
+                X=codes.copy(),
+                obs=pd.DataFrame(index=[str(i) for i in range(n_nodes)]),
+                var=pd.DataFrame(index=markers),
+            )
+            cluster_data.obsm["codes"] = codes
+
+            self.mudata = {
+                "cell_data": cell_data,
+                "cluster_data": cluster_data,
+            }
+
+    fake_flowsom.FlowSOM = FakeFlowSOM
+    fake_flowsom.FlowSOMEstimator = FakeFlowSOMEstimator
+    fake_models.BatchFlowSOMEstimator = FakeBatchFlowSOMEstimator
+    fake_models.FlowSOMEstimator = FakeFlowSOMEstimator
+
+    monkeypatch.setitem(__import__("sys").modules, "flowsom", fake_flowsom)
+    monkeypatch.setitem(__import__("sys").modules, "flowsom.models", fake_models)
 
 
 def _build_ingested_run(
@@ -305,3 +374,43 @@ def test_cluster_leiden_overwrites_same_cluster_key(
     adata = run.read_adata()
     assert adata.uns["clusterings"]["leiden_custom"]["resolution"] == 2.0
     assert meta2["resolution"] == 2.0
+
+
+def test_compute_flowsom_stores_full_varm_weights_for_marker_subset(
+    temp_dir,
+    example_standard_markers_path,
+    example_marker_aliases_path,
+    monkeypatch,
+):
+    """compute_flowsom should store weights in varm with full var dimension."""
+    _install_fake_flowsom(monkeypatch)
+    run = _build_ingested_run(
+        temp_dir, example_standard_markers_path, example_marker_aliases_path
+    )
+
+    meta = run.compute_flowsom(
+        markers=["H3", "ECad"],
+        grid_size=3,
+        n_iterations=5,
+        n_meta_clusters=2,
+        use_gpu=False,
+    )
+
+    adata = run.read_adata()
+    assert "X_flowsom" in adata.obs.columns
+    assert "X_flowsom_node" in adata.obsm
+    assert "flowsom_weights" in adata.varm
+
+    # 3x3 grid -> 9 nodes; varm must have one row per full marker set.
+    assert adata.varm["flowsom_weights"].shape == (adata.n_vars, 9)
+
+    h3_idx = list(adata.var_names).index("H3")
+    ecad_idx = list(adata.var_names).index("ECad")
+    h3k27_idx = list(adata.var_names).index("H3K27me3")
+
+    assert not np.isnan(adata.varm["flowsom_weights"][h3_idx]).all()
+    assert not np.isnan(adata.varm["flowsom_weights"][ecad_idx]).all()
+    assert np.isnan(adata.varm["flowsom_weights"][h3k27_idx]).all()
+
+    assert meta["method"] == "flowsom_package"
+    assert meta["n_nodes"] == 9

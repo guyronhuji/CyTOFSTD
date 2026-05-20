@@ -6,7 +6,7 @@ import stat
 import pandas as pd
 from pathlib import Path
 from cytofstandard import Project
-from cytofstandard.exceptions import RunNotFoundError, RunNotIngestedError
+from cytofstandard.exceptions import RunNotFoundError, RunNotIngestedError, ZarrLockedError
 
 
 def test_get_run(simple_project):
@@ -215,3 +215,86 @@ def test_lock_missing_zarr_part_raises(
 
     with pytest.raises(FileNotFoundError):
         run.lock_zarr_parts(parts=["layers/not_real"], strict=True)
+
+
+def _build_ingested_run(simple_project, simple_csv_file, sample_metadata_file, run_id="run_lock"):
+    run = simple_project.add_run(run_id=run_id)
+    raw_dir = simple_project.path / "runs" / run_id / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(simple_csv_file, raw_dir / simple_csv_file.name)
+    sample_df = pd.read_csv(sample_metadata_file)
+    sample_df["file_name"] = simple_csv_file.name
+    sample_df.to_csv(sample_metadata_file, index=False)
+    run.ingest(
+        files=[str(raw_dir / simple_csv_file.name)],
+        sample_metadata=str(sample_metadata_file),
+        copy_raw=False,
+        strict_markers=True,
+    )
+    return run
+
+
+def test_locked_zarr_parts_empty_when_writable(
+    simple_project, simple_csv_file, sample_metadata_file
+):
+    """locked_zarr_parts() returns empty list when nothing is locked."""
+    run = _build_ingested_run(simple_project, simple_csv_file, sample_metadata_file)
+    assert run.locked_zarr_parts() == []
+
+
+def test_locked_zarr_parts_reports_locked_part(
+    simple_project, simple_csv_file, sample_metadata_file
+):
+    """locked_zarr_parts() returns the locked part after lock_zarr_parts()."""
+    run = _build_ingested_run(simple_project, simple_csv_file, sample_metadata_file)
+    run.lock_zarr_parts(parts=["layers/raw"])
+    locked = run.locked_zarr_parts()
+    assert "layers/raw" in locked
+    run.unlock_zarr_parts(parts=["layers/raw"])
+
+
+def test_locked_zarr_parts_empty_after_unlock(
+    simple_project, simple_csv_file, sample_metadata_file
+):
+    """locked_zarr_parts() returns empty list after unlocking."""
+    run = _build_ingested_run(simple_project, simple_csv_file, sample_metadata_file)
+    run.lock_zarr_parts(parts=["obs"])
+    run.unlock_zarr_parts(parts=["obs"])
+    assert run.locked_zarr_parts() == []
+
+
+def test_locked_zarr_parts_not_ingested_raises(simple_project):
+    """locked_zarr_parts() raises RunNotIngestedError before ingest."""
+    run = simple_project.add_run(run_id="run_prelock")
+    with pytest.raises(Exception):
+        run.locked_zarr_parts()
+
+
+def test_write_to_locked_store_raises_zarr_locked_error(
+    simple_project, simple_csv_file, sample_metadata_file
+):
+    """save() raises ZarrLockedError when the store is fully locked."""
+    run = _build_ingested_run(simple_project, simple_csv_file, sample_metadata_file)
+    run.lock_zarr_parts()  # lock entire store
+
+    adata = run.read_adata()
+    adata.obs["new_col"] = "test"
+
+    with pytest.raises(ZarrLockedError, match="read-only"):
+        run.save(adata)
+
+    run.unlock_zarr_parts()
+
+
+def test_zarr_locked_error_message_names_run(
+    simple_project, simple_csv_file, sample_metadata_file
+):
+    """ZarrLockedError message includes the run ID."""
+    run = _build_ingested_run(simple_project, simple_csv_file, sample_metadata_file)
+    run.lock_zarr_parts()
+
+    adata = run.read_adata()
+    with pytest.raises(ZarrLockedError, match=run.run_id):
+        run.save(adata)
+
+    run.unlock_zarr_parts()

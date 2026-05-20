@@ -14,6 +14,7 @@ from cytofstandard.exceptions import (
     MetadataValidationError,
     MarkerValidationError,
     IngestionError,
+    ZarrLockedError,
 )
 
 __all__ = [
@@ -30,5 +31,6 @@ __all__ = [
     "MetadataValidationError",
     "MarkerValidationError",
     "IngestionError",
+    "ZarrLockedError",
 ]
-__version__ = "0.1.1"
+__version__ = "0.1.2"

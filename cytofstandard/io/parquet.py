@@ -39,3 +39,6 @@ def read_parquet(file_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     marker_metadata_df = pd.DataFrame(marker_metadata)
 
     return data_df, marker_metadata_df
+
+
+__all__ = ["read_parquet"]

@@ -163,3 +163,12 @@ def normalize_marker_name(name: str) -> str:
 
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized
+
+
+__all__ = [
+    "validate_file_list",
+    "validate_sample_metadata",
+    "validate_sample_id_unique",
+    "validate_marker_consistency",
+    "normalize_marker_name",
+]

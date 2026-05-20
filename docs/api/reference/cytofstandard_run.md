@@ -20,6 +20,29 @@ CytOF run for managing ingestion and data access.
 
 #### Methods
 
+##### `annotate_clusters(self, cluster_key: str, annotation_map: dict[str, str], output_key: str | None = None, inplace: bool = True) -> pd.Series`
+
+Map cluster labels to named cell types.
+
+Adds a new obs column with the mapped names.  Unmapped labels are
+passed through unchanged so partial mappings are allowed.
+
+Args:
+    cluster_key: Obs column containing cluster labels (e.g.
+        ``"my_umap_leiden"``).
+    annotation_map: Dict from cluster label (str) to cell-type name.
+        Keys are compared against string-cast cluster values, so
+        integer labels like ``0`` should be passed as ``"0"``.
+    output_key: Name for the new obs column.  Defaults to
+        ``"{cluster_key}_annotated"``.
+    inplace: If True, persist updated AnnData to Zarr.
+
+Returns:
+    pd.Series of annotated labels indexed by cell names.
+
+Raises:
+    ValueError: If ``cluster_key`` is not in ``adata.obs``.
+
 ##### `cluster_leiden(self, embedding_name: str, cluster_key: str | None = None, resolution: float = 1.0, n_iterations: int = 2, beta: float = 0.01, objective_function: str = 'modularity', seed: int = 42, verbose: bool = False, inplace: bool = True) -> dict[str, Any]`
 
 Cluster cells with Leiden using graph artifacts from an embedding.
@@ -116,6 +139,43 @@ Args:
 Returns:
     Newly created and persisted subset Run.
 
+##### `differential_abundance(self, cluster_key: str, groupby: str, comparisons: str | list[tuple[str, str]] | None = 'all', method: str = 'fisher', multitest: str | None = 'bh', order: list[str] | None = None, plot: bool = False, figsize: tuple[float, float] | None = None, ax = None) -> pd.DataFrame | tuple[pd.DataFrame, tuple]`
+
+Test whether cluster proportions differ between groups.
+
+For each cluster and each pair of groups, the observed cell counts are
+compared using Fisher's exact test or a chi-squared test.  P-values are
+optionally corrected across all clusters × all pairs.
+
+Args:
+    cluster_key: Obs column with cluster labels (e.g.
+        ``"my_umap_leiden"``).
+    groupby: Obs column defining the groups to compare (e.g.
+        ``"line_id"`` or ``"condition"``).
+    comparisons: ``"all"`` (every pair), ``"adjacent"`` (neighbours in
+        ``order``), explicit list of ``(group_a, group_b)`` tuples, or
+        ``None`` (skip — returns proportions without p-values).
+    method: ``"fisher"`` (Fisher's exact) or ``"chi2"``
+        (chi-squared contingency).
+    multitest: P-value correction: ``"bh"`` (Benjamini-Hochberg),
+        ``"bonferroni"``, or ``None``.
+    order: Explicit group order.  Defaults to sorted unique groups.
+    plot: If True, also return a stacked-bar proportion plot.
+    figsize: Figure size when ``plot=True``.
+    ax: Existing axes to draw on (single axes, ``plot=True`` only).
+
+Returns:
+    DataFrame with columns:
+        ``cluster``, ``group_a``, ``group_b``,
+        ``n_a``, ``n_b``, ``N_a``, ``N_b``,
+        ``freq_a``, ``freq_b``, ``p_value``, ``p_adj``
+
+    When ``plot=True``: ``(DataFrame, (fig, ax))``.
+
+Raises:
+    ValueError: If ``cluster_key`` or ``groupby`` are not in
+        ``adata.obs``.
+
 ##### `ingest(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, common_markers_only: bool = False, drop_columns: list[str] | None = None) -> None`
 
 Ingest files into this run.
@@ -153,6 +213,41 @@ Args:
 
 Returns:
     Normalized part paths that were locked. ``"."`` means full store.
+
+##### `match_clusterings(self, key_a: str, key_b: str, score_mode: str = 'jaccard', n_permutations: int = 1000, random_state: int = 0) -> dict`
+
+Compare two obs columns (clusterings or any categorical labels).
+
+Performs both many-to-one matching (every A label gets its best B
+label and vice versa) and one-to-one optimal matching via the
+Hungarian algorithm.  Hypergeometric enrichment and permutation-based
+significance are computed for each match.
+
+Args:
+    key_a: First obs column (e.g. ``"CL"``).
+    key_b: Second obs column (e.g. ``"sample_id"`` or ``"CL_ID"``).
+    score_mode: Matching criterion — ``"jaccard"`` (default),
+        ``"a"`` (fraction of A in B), ``"b"`` (fraction of B from A),
+        or ``"overlap"`` / ``None`` (raw count).
+    n_permutations: Permutations for global significance test.
+        Set to 0 to skip.
+    random_state: Random seed.
+
+Returns:
+    dict with keys:
+
+    - ``A_to_B`` — every A label matched to its best B label
+    - ``B_to_A`` — every B label matched to its best A label
+    - ``one_to_one_matches`` — Hungarian optimal assignment
+    - ``contingency`` — raw overlap crosstab
+    - ``score_matrix`` — scoring matrix used for matching
+    - ``B_receives_from_A``, ``A_receives_from_B`` — split/merge structure
+    - ``ari``, ``nmi`` — global agreement metrics
+    - ``global_many_to_one_score_A_to_B``, ``_B_to_A``, ``_one_to_one``
+    - ``permutation_p_A_to_B``, ``_B_to_A``, ``_one_to_one``
+
+Raises:
+    ValueError: If either key is not in ``adata.obs``.
 
 ##### `normalize_with_cytof_transform(self, control_markers: list[str], markers_to_correct: list[str], source_layer: str = 'raw', corrected_layer: str = 'normalized', z_layer: str = 'normalized_z', groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, anchor_to_median: bool = True, zscore: bool = True, module_name: str = 'cytof_transform', inplace: bool = True) -> dict[str, Any]`
 
@@ -248,6 +343,37 @@ Args:
 
 Returns:
     Tuple of (figure, axes).
+
+##### `plot_cluster_composition(self, cluster_key: str, groupby: str, normalize: str = 'cluster', palette = None, figsize: tuple[float, float] | None = None, legend_kwargs: dict | None = None, ax = None) -> tuple`
+
+Stacked bar chart of label composition.
+
+Two modes controlled by ``normalize``:
+
+- ``"cluster"`` *(default)* — one bar per cluster, showing the
+  fraction of cells in that cluster that come from each group (e.g.
+  sample).  Answers: *"what samples make up each cluster?"*
+- ``"group"`` — one bar per group, showing the fraction of cells in
+  that group assigned to each cluster.  Answers: *"how are each
+  sample's cells distributed across clusters?"*
+
+Args:
+    cluster_key: Obs column with cluster labels.
+    groupby: Obs column with group labels (e.g. ``"sample_id"``).
+    normalize: ``"cluster"`` or ``"group"``.
+    palette: Colour palette passed to seaborn.  ``None`` uses the
+        default categorical palette.
+    figsize: Figure size.  Defaults to a width proportional to the
+        number of bars.
+    legend_kwargs: Extra kwargs forwarded to ``ax.legend()``.
+    ax: Existing axes to draw on.
+
+Returns:
+    ``(fig, ax)`` tuple.
+
+Raises:
+    ValueError: If ``cluster_key`` or ``groupby`` are not in obs,
+        or ``normalize`` is not ``"cluster"`` or ``"group"``.
 
 ##### `plot_heatmap(self, fields: list[str], groupby, layer: str = 'X', agg: str = 'mean', standard_scale: str | None = None, cmap: str | None = None, center: float | None = None, annot: bool = False, fmt: str = '.2f', order: list[str] | None = None, figsize: tuple[float, float] | None = None, ax = None, heatmap_kwargs: dict | None = None)`
 

@@ -228,6 +228,52 @@ def set_zarr_parts_writable(
     return processed_parts
 
 
+def get_locked_zarr_parts(zarr_root: str | Path) -> list[str]:
+    """Return logical zarr parts that contain any read-only files.
+
+    Scans the top-level directories of the zarr store (and one level deeper
+    inside ``layers/`` to expose individual layer names) and returns those
+    whose file trees contain at least one file without owner-write permission.
+
+    Args:
+        zarr_root: Root directory of the Zarr store.
+
+    Returns:
+        Sorted list of locked part paths (e.g. ``["layers/raw", "obs"]``).
+        An empty list means the store is fully writable.
+        ``["."]`` means the entire store is locked.
+    """
+    root = Path(zarr_root)
+    if not root.exists():
+        raise FileNotFoundError(f"Zarr root not found: {root}")
+
+    def _has_readonly(path: Path) -> bool:
+        for p in _iter_paths_recursive(path):
+            if p.is_file() and not (p.stat().st_mode & stat.S_IWUSR):
+                return True
+        return False
+
+    # Collect logical parts: top-level dirs, expanding layers/* one level
+    logical_parts: list[tuple[str, Path]] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        rel = child.name
+        if rel == "layers":
+            for layer in sorted(child.iterdir()):
+                if layer.is_dir():
+                    logical_parts.append((f"layers/{layer.name}", layer))
+        else:
+            logical_parts.append((rel, child))
+
+    # Fall back to whole-store check if no sub-dirs found
+    if not logical_parts:
+        return ["."] if _has_readonly(root) else []
+
+    locked = [part for part, path in logical_parts if _has_readonly(path)]
+    return locked
+
+
 def _normalize_zarr_parts(parts: list[str] | None) -> list[str]:
     """Return normalized relative part paths.
 
@@ -266,3 +312,21 @@ def _set_single_path_writable(path: Path, writable: bool) -> None:
 
     if new_mode != mode:
         os.chmod(path, new_mode)
+
+
+__all__ = [
+    "compute_sha256",
+    "compute_file_hashes",
+    "read_yaml",
+    "write_yaml",
+    "read_parquet",
+    "write_parquet",
+    "ensure_directory",
+    "get_directory_size",
+    "copy_file",
+    "file_exists",
+    "directory_exists",
+    "copy_files_to_directory",
+    "set_zarr_parts_writable",
+    "get_locked_zarr_parts",
+]

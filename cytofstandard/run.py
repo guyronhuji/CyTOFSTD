@@ -22,6 +22,7 @@ from cytofstandard.exceptions import (
     RunNotIngestedError,
     MetadataValidationError,
     MarkerValidationError,
+    ZarrLockedError,
 )
 from cytofstandard.storage import (
     ensure_directory,
@@ -33,6 +34,7 @@ from cytofstandard.storage import (
     file_exists,
     directory_exists,
     set_zarr_parts_writable,
+    get_locked_zarr_parts,
 )
 from cytofstandard.uuid_utils import generate_cell_uuid
 from cytofstandard.validation import (
@@ -92,6 +94,7 @@ class Run:
         allow_extra_markers: bool = False,
         common_markers_only: bool = False,
         drop_columns: list[str] | None = None,
+        show_marker_coverage: bool = False,
     ) -> None:
         """Ingest files into this run.
 
@@ -104,6 +107,11 @@ class Run:
             common_markers_only: If True, drop markers that are not present in
                 all files for this run.
             drop_columns: Column names to remove before marker processing
+            show_marker_coverage: If True, display a heatmap after ingestion
+                showing which standard markers are present or absent in each
+                file.  Only markers that are missing from at least one file are
+                shown; if all markers are present in all files the plot is
+                skipped and a message is printed.
 
         Raises:
             MetadataValidationError if metadata validation fails
@@ -325,6 +333,9 @@ class Run:
             allow_extra_markers=allow_extra_markers,
         )
 
+        if show_marker_coverage:
+            self._plot_marker_coverage(all_marker_mappings, sample_df)
+
         # Build AnnData object
         if not all_data:
             raise IngestionError("No data was ingested")
@@ -346,7 +357,7 @@ class Run:
         csv_meta_cols_list = [f"csv_meta_{c}" for c in all_csv_meta_cols]
         non_marker_cols = set(obs_cols) | optional_field_cols | set(csv_meta_cols_list)
 
-        marker_cols = [c for c in combined.columns if c not in non_marker_cols]
+        marker_cols = sorted(c for c in combined.columns if c not in non_marker_cols)
         if common_markers_only:
             marker_cols = [c for c in marker_cols if c in common_markers]
             if not marker_cols:
@@ -459,7 +470,7 @@ class Run:
         }
         adata.uns["ingestion"] = {
             "created_at": datetime.utcnow().isoformat(),
-            "package_version": "0.1.1",
+            "package_version": "0.1.2",
             "strict_markers": strict_markers,
             "common_markers_only": common_markers_only,
             "drop_columns": drop_columns,
@@ -484,7 +495,7 @@ class Run:
 
         # Write Zarr
         zarr_path = self.path / "processed" / f"{self.run_id}.zarr"
-        adata.write_zarr(zarr_path)
+        self._write_zarr(adata, zarr_path)
 
         # Save file manifest
         manifest_path = self.path / "metadata" / "file_manifest.parquet"
@@ -581,6 +592,99 @@ class Run:
             self._update_marker_variables(self._adata)
 
         return self._adata
+
+    def ingestion_summary(self) -> pd.DataFrame:
+        """Return a DataFrame summarising every file and sample ingested into this run.
+
+        Columns always present:
+
+        - ``file_name`` — original filename
+        - ``sample_id`` — sample identifier from the metadata sheet
+        - ``line_id`` — cell-line identifier
+        - ``n_events_file`` — cells read from the file at ingest time
+        - ``n_cells_obs`` — cells currently in the zarr (after any QC gating)
+        - ``file_type`` — ``"csv"``, ``"fcs"``, ``"parquet"``, …
+        - ``file_size_bytes`` — original file size
+        - ``ingested_at`` — UTC timestamp of ingestion
+
+        Additional metadata columns from the sample metadata sheet (e.g.
+        ``"condition"``, ``"replicate_id"``) are included when available.
+
+        Raises:
+            RunNotIngestedError: If the run has not been ingested yet.
+        """
+        self.require_ingested()
+
+        manifest_path = self.path / "metadata" / "file_manifest.parquet"
+        if not manifest_path.exists():
+            raise RunNotIngestedError(
+                f"Run '{self.run_id}' has no file manifest. "
+                "Re-ingest the run to generate one."
+            )
+
+        manifest = read_parquet(str(manifest_path)).rename(
+            columns={"n_events": "n_events_file"}
+        )
+
+        adata = self.read_adata()
+        obs = adata.obs
+
+        # Internal / cell-level columns that are never sample-level metadata
+        _skip = {
+            "cell_uuid", "project_id", "run_id", "sample_id", "line_id",
+            "source_file", "source_file_hash", "event_index",
+        }
+
+        # Only include columns where every cell within a given file shares the
+        # same value — i.e. genuinely sample/file-level metadata (e.g. condition)
+        # rather than per-cell computed values (e.g. norm_tech_factor, cluster IDs).
+        def _is_file_level(col: str) -> bool:
+            return (
+                obs.groupby("source_file_hash", observed=True)[col]
+                .nunique()
+                .le(1)
+                .all()
+            )
+
+        extra_meta_cols = [
+            c for c in obs.columns
+            if c not in _skip and _is_file_level(c)
+        ]
+
+        # Build one row per file from obs: sample_id, line_id, extra metadata
+        # Join key: source_file_hash (obs) ↔ file_hash_sha256 (manifest)
+        obs_per_file = (
+            obs[["source_file_hash", "sample_id", "line_id"] + extra_meta_cols]
+            .drop_duplicates(subset=["source_file_hash"])
+            .rename(columns={"source_file_hash": "file_hash_sha256"})
+            .reset_index(drop=True)
+        )
+
+        # Per-sample cell counts after any QC gating
+        cell_counts = (
+            obs.groupby("sample_id", observed=True)
+            .size()
+            .rename("n_cells_obs")
+            .reset_index()
+        )
+
+        # Merge everything onto the manifest (one row per ingested file)
+        summary = manifest.merge(obs_per_file, on="file_hash_sha256", how="left")
+        summary = summary.merge(cell_counts, on="sample_id", how="left")
+
+        # Drop internal/redundant columns
+        drop_cols = {"run_id", "stored_path", "file_hash_sha256"}
+        summary = summary.drop(columns=[c for c in drop_cols if c in summary.columns])
+
+        # Preferred column order
+        front = [
+            "file_name", "sample_id", "line_id",
+            "n_events_file", "n_cells_obs",
+            "file_type", "file_size_bytes", "ingested_at",
+        ]
+        ordered = [c for c in front if c in summary.columns]
+        rest = [c for c in summary.columns if c not in ordered]
+        return summary[ordered + rest].reset_index(drop=True)
 
     def subsample_by_group(
         self,
@@ -694,7 +798,7 @@ class Run:
                 )
             self._adata = self.read_adata()
 
-        self._adata.write_zarr(self.zarr_path())
+        self._write_zarr(self._adata)
         self._update_marker_variables(self._adata)
         self._log_run_event(
             "run_saved",
@@ -941,7 +1045,7 @@ class Run:
         )
 
         if inplace:
-            self.save()
+            self._try_save_inplace()
 
     @staticmethod
     def _load_mlx_umap_modules(module_name: str = "mlx_umap"):
@@ -1203,7 +1307,7 @@ class Run:
             },
         )
         if inplace:
-            self.save()
+            self._try_save_inplace()
 
         return metadata
 
@@ -1412,7 +1516,7 @@ class Run:
             },
         )
         if inplace:
-            self.save()
+            self._try_save_inplace()
 
         return metadata
 
@@ -1544,7 +1648,7 @@ class Run:
             },
         )
         if inplace:
-            self.save()
+            self._try_save_inplace()
 
         return metadata
 
@@ -1799,9 +1903,355 @@ class Run:
             },
         )
         if inplace:
-            self.save()
+            self._try_save_inplace()
 
         return metadata
+
+    def compute_flowsom(
+        self,
+        markers: list[str],
+        source_layer: str = "X",
+        grid_size: int | tuple[int, int] = 10,
+        n_iterations: int = 100,
+        neighborhood_radius: int = 1,
+        learning_rate: float = 0.5,
+        cluster_method: str = "leiden",
+        cluster_resolution: float = 1.0,
+        n_meta_clusters: int | None = None,
+        random_state: int = 42,
+        verbose: bool = False,
+        inplace: bool = True,
+        use_gpu: bool = True,
+    ) -> dict[str, Any]:
+        """Compute FlowSOM clustering.
+
+        Uses the external ``flowsom`` package (no local reimplementation).
+        Results are copied back into this run's AnnData object:
+
+        - ``adata.obs['X_flowsom']``: FlowSOM metaclusters
+        - ``adata.obsm['X_flowsom_node']``: SOM node assignment per cell
+        - ``adata.varm['flowsom_weights']``: SOM codebook (markers x nodes)
+
+        Args:
+            markers: Markers to use for clustering (must exist in `adata.var_names`).
+            source_layer: Layer used for expression values (`X` or layer key).
+            grid_size: SOM grid size (10x10) or (rows, cols) tuple.
+            n_iterations: FlowSOM training passes (`rlen`).
+            neighborhood_radius: Kept for compatibility (stored in metadata).
+            learning_rate: Initial FlowSOM learning rate (`alpha[0]`).
+            cluster_method: Kept for compatibility. FlowSOM metaclustering is
+                always used as final labels.
+            cluster_resolution: Backward-compatible hint used to derive default
+                ``n_meta_clusters`` when not provided.
+            n_meta_clusters: Explicit number of FlowSOM metaclusters.
+            random_state: RNG seed.
+            verbose: If True, print progress to stdout.
+            inplace: If True, persist results to run zarr.
+            use_gpu: If True, request MPS when available (best-effort; only
+                used when the installed FlowSOM backend exposes a ``device``
+                parameter).
+
+        Returns:
+            Metadata dict with FlowSOM metadata stored under
+            `adata.uns["clusterings"]["X_flowsom"]` and `adata.uns["flowsom"]`.
+        """
+        import time as _time
+        import warnings as _warnings
+
+        try:
+            import flowsom
+        except ImportError as exc:
+            raise ImportError(
+                "compute_flowsom requires the 'flowsom' package. "
+                "Install with: pip install flowsom"
+            ) from exc
+
+        try:
+            from flowsom.models import BatchFlowSOMEstimator, FlowSOMEstimator
+        except ImportError as exc:
+            raise ImportError(
+                "Unable to import FlowSOM estimator classes from 'flowsom.models'."
+            ) from exc
+
+        adata = self.read_adata()
+        matrix = self._matrix_from_layer(adata, source_layer)
+        var_names = adata.var_names.astype(str).tolist()
+
+        marker_to_idx = {name: i for i, name in enumerate(var_names)}
+        missing = [m for m in markers if m not in marker_to_idx]
+        if missing:
+            raise ValueError(f"Markers not found for FlowSOM: {missing}")
+        marker_idx = [marker_to_idx[m] for m in markers]
+        x_embed = np.asarray(matrix[:, marker_idx], dtype=np.float32, order="C")
+
+        n_cells, _ = x_embed.shape
+
+        if isinstance(grid_size, int):
+            grid_rows = grid_cols = grid_size
+        else:
+            grid_rows, grid_cols = grid_size
+
+        if grid_rows <= 0 or grid_cols <= 0:
+            raise ValueError("grid_size dimensions must be > 0")
+        if n_iterations <= 0:
+            raise ValueError("n_iterations must be > 0")
+        if learning_rate <= 0:
+            raise ValueError("learning_rate must be > 0")
+
+        n_nodes = grid_rows * grid_cols
+
+        if cluster_method not in {"leiden", "flowsom", "metaclustering"}:
+            raise ValueError(
+                "cluster_method must be one of: 'leiden', 'flowsom', 'metaclustering'"
+            )
+
+        if n_meta_clusters is None:
+            n_meta_clusters = max(2, int(round(cluster_resolution * 10)))
+        n_meta_clusters = int(np.clip(n_meta_clusters, 2, n_nodes))
+
+        device_requested = "cpu"
+        device_used = "cpu"
+        mps_available = False
+        mps_enabled = False
+        model_kwargs: dict[str, Any] = {}
+        model_class = BatchFlowSOMEstimator
+
+        if use_gpu:
+            try:
+                import torch
+
+                mps_available = bool(
+                    hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+                )
+            except Exception:
+                mps_available = False
+
+            if mps_available:
+                device_requested = "mps"
+                for candidate in [BatchFlowSOMEstimator, FlowSOMEstimator]:
+                    try:
+                        params = inspect.signature(candidate.__init__).parameters
+                    except (TypeError, ValueError):
+                        params = {}
+                    if "device" in params:
+                        model_class = candidate
+                        model_kwargs["device"] = "mps"
+                        mps_enabled = True
+                        device_used = "mps"
+                        break
+
+                if not mps_enabled:
+                    _warnings.warn(
+                        "MPS is available but the installed flowsom backend does not expose a device parameter; running FlowSOM on CPU.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
+        alpha_end = max(0.01, float(learning_rate) * 0.2)
+        alpha = (float(learning_rate), alpha_end)
+
+        fs_adata = anndata.AnnData(
+            X=x_embed,
+            obs=adata.obs.copy(),
+            var=pd.DataFrame(index=np.asarray(markers, dtype=str)),
+        )
+        fs_adata.obs_names = adata.obs_names.copy()
+
+        if verbose:
+            print(
+                f"[compute_flowsom] cells={n_cells} markers={len(markers)} "
+                f"grid={grid_rows}x{grid_cols} rlen={n_iterations} "
+                f"n_meta_clusters={n_meta_clusters} model={model_class.__name__} "
+                f"device={device_used}"
+            )
+
+        t0 = _time.perf_counter()
+        fsom = flowsom.FlowSOM(
+            fs_adata,
+            cols_to_use=list(markers),
+            n_clusters=n_meta_clusters,
+            model=model_class,
+            xdim=grid_rows,
+            ydim=grid_cols,
+            rlen=n_iterations,
+            alpha=alpha,
+            seed=random_state,
+            **model_kwargs,
+        )
+        fit_sec = float(_time.perf_counter() - t0)
+
+        cell_data = fsom.mudata["cell_data"]
+        cluster_data = fsom.mudata["cluster_data"]
+
+        node_labels = np.asarray(cell_data.obs["clustering"], dtype=np.int32)
+        metacluster_labels = cell_data.obs["metaclustering"].astype(str)
+
+        adata.obsm["X_flowsom_node"] = node_labels.reshape(-1, 1).astype(np.int32)
+
+        cluster_key = "X_flowsom"
+        adata.obs[cluster_key] = pd.Categorical(metacluster_labels)
+
+        if "codes" in cluster_data.obsm:
+            codes = np.asarray(cluster_data.obsm["codes"], dtype=np.float32)
+        else:
+            codes = np.asarray(cluster_data.X, dtype=np.float32)
+
+        # AnnData varm must have first dimension == adata.n_vars.
+        # FlowSOM codes only cover the selected marker subset, so place those
+        # rows into a full marker-by-node matrix and leave other markers as NaN.
+        full_weights = np.full((adata.n_vars, codes.shape[0]), np.nan, dtype=np.float32)
+        full_weights[np.asarray(marker_idx, dtype=np.int32), :] = codes.T.astype(np.float32)
+        adata.varm["flowsom_weights"] = full_weights
+
+        if "grid" in cluster_data.obsm:
+            adata.uns["flowsom_grid"] = np.asarray(cluster_data.obsm["grid"], dtype=np.int32)
+
+        n_clusters = int(pd.Series(metacluster_labels).nunique())
+
+        clusterings_uns = self._upsert_nested_uns_dict(adata, "clusterings")
+        metadata = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "method": "flowsom_package",
+            "model_class": f"{model_class.__module__}.{model_class.__name__}",
+            "source_layer": source_layer,
+            "markers": list(markers),
+            "grid_size": {"rows": grid_rows, "cols": grid_cols},
+            "n_iterations": int(n_iterations),
+            "alpha": [float(alpha[0]), float(alpha[1])],
+            "neighborhood_radius": float(neighborhood_radius),
+            "learning_rate": float(learning_rate),
+            "cluster_method_requested": str(cluster_method),
+            "cluster_method": "flowsom_metaclustering",
+            "cluster_resolution": float(cluster_resolution),
+            "n_meta_clusters": int(n_meta_clusters),
+            "cluster_key": cluster_key,
+            "node_key": "X_flowsom_node",
+            "n_cells": int(n_cells),
+            "n_markers": int(len(markers)),
+            "n_nodes": int(codes.shape[0]),
+            "n_clusters": n_clusters,
+            "fit_sec": fit_sec,
+            "use_gpu": bool(use_gpu),
+            "mps_available": bool(mps_available),
+            "mps_requested": bool(device_requested == "mps"),
+            "mps_enabled": bool(mps_enabled),
+            "device_used": device_used,
+        }
+        clusterings_uns[cluster_key] = metadata
+
+        flowsom_uns = self._upsert_nested_uns_dict(adata, "flowsom")
+        flowsom_uns["latest"] = {
+            "method": "flowsom_package",
+            "grid_size": {"rows": grid_rows, "cols": grid_cols},
+            "n_iterations": int(n_iterations),
+            "neighborhood_radius": float(neighborhood_radius),
+            "learning_rate": float(learning_rate),
+            "random_state": int(random_state),
+            "cluster_resolution": float(cluster_resolution),
+            "n_meta_clusters": int(n_meta_clusters),
+            "n_nodes": int(codes.shape[0]),
+            "n_clusters": n_clusters,
+            "n_cells_assigned": int(n_cells),
+            "fit_sec": fit_sec,
+            "device_used": device_used,
+            "mps_available": bool(mps_available),
+            "mps_enabled": bool(mps_enabled),
+        }
+
+        if verbose:
+            print(
+                f"[compute_flowsom] done cluster_key='{cluster_key}' "
+                f"n_clusters={n_clusters} fit_sec={fit_sec:.3f} device={device_used}"
+            )
+
+        self._adata = adata
+        self._log_run_event(
+            "flowsom_clustered",
+            {
+                "grid_rows": int(grid_rows),
+                "grid_cols": int(grid_cols),
+                "n_iterations": int(n_iterations),
+                "learning_rate": float(learning_rate),
+                "cluster_resolution": float(cluster_resolution),
+                "n_meta_clusters": int(n_meta_clusters),
+                "n_clusters": n_clusters,
+                "n_cells": int(n_cells),
+                "n_markers": int(len(markers)),
+                "device_used": device_used,
+                "mps_enabled": bool(mps_enabled),
+            },
+        )
+        if inplace:
+            self._try_save_inplace()
+
+        return metadata
+
+    def annotate_clusters(
+        self,
+        cluster_key: str,
+        annotation_map: dict[str, str],
+        output_key: str | None = None,
+        inplace: bool = True,
+    ) -> pd.Series:
+        """Map cluster labels to named cell types.
+
+        Adds a new obs column with the mapped names.  Unmapped labels are
+        passed through unchanged so partial mappings are allowed.
+
+        Args:
+            cluster_key: Obs column containing cluster labels (e.g.
+                ``"my_umap_leiden"``).
+            annotation_map: Dict from cluster label (str) to cell-type name.
+                Keys are compared against string-cast cluster values, so
+                integer labels like ``0`` should be passed as ``"0"``.
+            output_key: Name for the new obs column.  Defaults to
+                ``"{cluster_key}_annotated"``.
+            inplace: If True, persist updated AnnData to Zarr.
+
+        Returns:
+            pd.Series of annotated labels indexed by cell names.
+
+        Raises:
+            ValueError: If ``cluster_key`` is not in ``adata.obs``.
+        """
+        import warnings
+
+        adata = self.read_adata()
+        if cluster_key not in adata.obs.columns:
+            raise ValueError(
+                f"cluster_key '{cluster_key}' not found in adata.obs. "
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+
+        output_key = output_key or f"{cluster_key}_annotated"
+        src = adata.obs[cluster_key].astype(str)
+
+        missing_keys = set(annotation_map.keys()) - set(src.unique())
+        if missing_keys:
+            warnings.warn(
+                f"annotation_map keys not found in '{cluster_key}': {missing_keys}",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        annotated = src.map(annotation_map).fillna(src)
+        adata.obs[output_key] = annotated.values
+
+        n_mapped = int((annotated != src).sum())
+        self._log_run_event(
+            "clusters_annotated",
+            {
+                "cluster_key": cluster_key,
+                "output_key": output_key,
+                "n_mapped": n_mapped,
+                "annotation_map": annotation_map,
+            },
+        )
+
+        if inplace:
+            self._try_save_inplace(adata)
+
+        return annotated
 
     def _resolve_permcell_module(
         self,
@@ -2084,7 +2534,7 @@ class Run:
             },
         )
         if inplace:
-            self.save()
+            self._try_save_inplace()
 
         result = {
             "z": smoothed_scores["z"],
@@ -2191,6 +2641,91 @@ class Run:
             "embedding_key": embedding_key,
         }
         return out
+
+    def _plot_marker_coverage(
+        self,
+        all_marker_mappings: list[pd.DataFrame],
+        sample_df: pd.DataFrame,
+    ) -> None:
+        """Display a heatmap of standard-marker presence/absence across files.
+
+        Only markers missing from at least one file are shown.
+        If every marker is present in every file, prints a message instead.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+        except ImportError as exc:
+            raise ImportError(
+                "show_marker_coverage requires matplotlib and seaborn."
+            ) from exc
+
+        matched_statuses = {"matched_standard", "matched_alias"}
+
+        fname_to_sample: dict[str, str] = {}
+        if "sample_id" in sample_df.columns and "file_name" in sample_df.columns:
+            fname_to_sample = dict(
+                zip(sample_df["file_name"], sample_df["sample_id"])
+            )
+
+        file_order: list[str] = []
+        file_markers: dict[str, set[str]] = {}
+        for mapping_df in all_marker_mappings:
+            fname = mapping_df["file_name"].iloc[0]
+            label = fname_to_sample.get(fname, fname)
+            matched = mapping_df[mapping_df["mapping_status"].isin(matched_statuses)]
+            file_markers[label] = set(matched["standard_marker_name"].dropna().tolist())
+            file_order.append(label)
+
+        all_standard = sorted(
+            {m for markers in file_markers.values() for m in markers}
+        )
+
+        presence = pd.DataFrame(
+            {
+                label: [m in file_markers[label] for m in all_standard]
+                for label in file_order
+            },
+            index=all_standard,
+        )
+
+        coverage_df = presence[~presence.all(axis=1)]
+
+        if coverage_df.empty:
+            print(
+                f"[{self.run_id}] Marker coverage: all {len(all_standard)} standard markers "
+                "are present in every file — nothing to show."
+            )
+            return
+
+        n_markers, n_files = coverage_df.shape
+        fig, ax = plt.subplots(
+            figsize=(max(4, n_files * 0.8 + 2), max(3, n_markers * 0.35 + 1.5))
+        )
+        # red = absent (0), green = present (1)
+        sns.heatmap(
+            coverage_df.astype(int),
+            annot=False,
+            cmap=sns.color_palette(["#d62728", "#2ca02c"], as_cmap=False),
+            vmin=0,
+            vmax=1,
+            linewidths=0.4,
+            linecolor="white",
+            cbar=False,
+            ax=ax,
+        )
+        ax.set_title(
+            f"{self.run_id} — marker coverage\n"
+            f"({n_markers} marker(s) missing in ≥1 file)  "
+            "green = present  |  red = absent",
+            fontsize=10,
+        )
+        ax.set_xlabel("Sample")
+        ax.set_ylabel("Standard marker")
+        ax.tick_params(axis="x", rotation=45)
+        ax.tick_params(axis="y", rotation=0)
+        fig.tight_layout()
+        plt.show()
 
     @staticmethod
     def _sanitize_observed_marker_name(name: Any) -> str:
@@ -2496,7 +3031,7 @@ class Run:
             scaled = scaled.sub(col_mean, axis=1).div(col_std, axis=1).fillna(0.0)
 
         if cmap is None:
-            cmap = "RdBu_r" if standard_scale is not None else "viridis"
+            cmap = "seismic"
         if center is None and standard_scale is not None:
             center = 0.0
 
@@ -2676,6 +3211,643 @@ class Run:
         else:
             out["p_adj"] = np.nan
         return out
+
+    def differential_abundance(
+        self,
+        cluster_key: str,
+        groupby: str,
+        comparisons: str | list[tuple[str, str]] | None = "all",
+        method: str = "fisher",
+        multitest: str | None = "bh",
+        order: list[str] | None = None,
+        plot: bool = False,
+        figsize: tuple[float, float] | None = None,
+        ax=None,
+    ) -> pd.DataFrame | tuple[pd.DataFrame, tuple]:
+        """Test whether cluster proportions differ between groups.
+
+        For each cluster and each pair of groups, the observed cell counts are
+        compared using Fisher's exact test or a chi-squared test.  P-values are
+        optionally corrected across all clusters × all pairs.
+
+        Args:
+            cluster_key: Obs column with cluster labels (e.g.
+                ``"my_umap_leiden"``).
+            groupby: Obs column defining the groups to compare (e.g.
+                ``"line_id"`` or ``"condition"``).
+            comparisons: ``"all"`` (every pair), ``"adjacent"`` (neighbours in
+                ``order``), explicit list of ``(group_a, group_b)`` tuples, or
+                ``None`` (skip — returns proportions without p-values).
+            method: ``"fisher"`` (Fisher's exact) or ``"chi2"``
+                (chi-squared contingency).
+            multitest: P-value correction: ``"bh"`` (Benjamini-Hochberg),
+                ``"bonferroni"``, or ``None``.
+            order: Explicit group order.  Defaults to sorted unique groups.
+            plot: If True, also return a stacked-bar proportion plot.
+            figsize: Figure size when ``plot=True``.
+            ax: Existing axes to draw on (single axes, ``plot=True`` only).
+
+        Returns:
+            DataFrame with columns:
+                ``cluster``, ``group_a``, ``group_b``,
+                ``n_a``, ``n_b``, ``N_a``, ``N_b``,
+                ``freq_a``, ``freq_b``, ``p_value``, ``p_adj``
+
+            When ``plot=True``: ``(DataFrame, (fig, ax))``.
+
+        Raises:
+            ValueError: If ``cluster_key`` or ``groupby`` are not in
+                ``adata.obs``.
+        """
+        if method not in {"fisher", "chi2"}:
+            raise ValueError("method must be 'fisher' or 'chi2'")
+        if multitest not in {None, "bh", "bonferroni"}:
+            raise ValueError("multitest must be None, 'bh', or 'bonferroni'")
+
+        adata = self.read_adata()
+        if cluster_key not in adata.obs.columns:
+            raise ValueError(
+                f"cluster_key '{cluster_key}' not found in adata.obs. "
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+        if groupby not in adata.obs.columns:
+            raise ValueError(
+                f"groupby '{groupby}' not found in adata.obs. "
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+
+        ct = pd.crosstab(adata.obs[groupby], adata.obs[cluster_key].astype(str))
+        groups = order if order is not None else sorted(ct.index.tolist())
+        ct = ct.loc[groups]
+        clusters = ct.columns.tolist()
+
+        pairs = self._build_comparison_pairs(groups, comparisons)
+
+        try:
+            from scipy import stats
+        except ImportError as exc:
+            raise ImportError(
+                "differential_abundance requires scipy. "
+                "Install with: pip install scipy"
+            ) from exc
+
+        rows = []
+        pvals = []
+        for group_a, group_b in pairs:
+            N_a = int(ct.loc[group_a].sum())
+            N_b = int(ct.loc[group_b].sum())
+            for c in clusters:
+                n_a = int(ct.loc[group_a, c])
+                n_b = int(ct.loc[group_b, c])
+                freq_a = n_a / N_a if N_a > 0 else float("nan")
+                freq_b = n_b / N_b if N_b > 0 else float("nan")
+                table = [[n_a, N_a - n_a], [n_b, N_b - n_b]]
+                if method == "fisher":
+                    _, p_value = stats.fisher_exact(table)
+                else:
+                    _, p_value, _, _ = stats.chi2_contingency(table)
+                p_value = float(p_value)
+                rows.append(
+                    {
+                        "cluster": c,
+                        "group_a": group_a,
+                        "group_b": group_b,
+                        "n_a": n_a,
+                        "n_b": n_b,
+                        "N_a": N_a,
+                        "N_b": N_b,
+                        "freq_a": freq_a,
+                        "freq_b": freq_b,
+                        "p_value": p_value,
+                    }
+                )
+                pvals.append(p_value)
+
+        results_df = pd.DataFrame(
+            rows,
+            columns=[
+                "cluster",
+                "group_a",
+                "group_b",
+                "n_a",
+                "n_b",
+                "N_a",
+                "N_b",
+                "freq_a",
+                "freq_b",
+                "p_value",
+            ],
+        )
+
+        if pvals and multitest is not None:
+            results_df["p_adj"] = self._adjust_pvalues(pvals, method=multitest)
+        else:
+            results_df["p_adj"] = np.nan
+
+        self._log_run_event(
+            "differential_abundance",
+            {
+                "cluster_key": cluster_key,
+                "groupby": groupby,
+                "method": method,
+                "n_clusters": len(clusters),
+                "n_pairs": len(pairs),
+            },
+        )
+
+        if not plot:
+            return results_df
+
+        try:
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+        except ImportError as exc:
+            raise ImportError(
+                "differential_abundance with plot=True requires matplotlib and seaborn. "
+                "Install with: pip install matplotlib seaborn"
+            ) from exc
+
+        props = ct.div(ct.sum(axis=1), axis=0)
+        long_df = props.reset_index().melt(
+            id_vars=groupby, var_name="cluster", value_name="proportion"
+        )
+
+        if ax is None:
+            fig, ax = plt.subplots(
+                figsize=figsize or (max(6, 0.6 * len(clusters) + 2), 4)
+            )
+        else:
+            fig = ax.figure
+
+        sns.barplot(data=long_df, x="cluster", y="proportion", hue=groupby, ax=ax)
+        ax.set_xlabel("Cluster")
+        ax.set_ylabel("Proportion")
+        ax.legend(title=groupby, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
+
+        if pairs and not results_df.empty:
+            y_max = props.values.max()
+            step = y_max * 0.08
+            pair_offsets: dict[str, int] = {}
+            for _, row in results_df.iterrows():
+                c = row["cluster"]
+                stars = self._pvalue_to_stars(row["p_adj"] if not np.isnan(row["p_adj"]) else row["p_value"])
+                if stars == "ns":
+                    continue
+                cluster_x_positions = {cl: i for i, cl in enumerate(clusters)}
+                x_pos = cluster_x_positions.get(c, 0)
+                offset_idx = pair_offsets.get(c, 0)
+                y_pos = y_max + step * (offset_idx + 1)
+                ax.text(
+                    x_pos,
+                    y_pos,
+                    stars,
+                    ha="center",
+                    va="bottom",
+                    fontsize=10,
+                )
+                pair_offsets[c] = offset_idx + 1
+
+        fig.tight_layout()
+        return results_df, (fig, ax)
+
+    def match_clusterings(
+        self,
+        key_a: str,
+        key_b: str,
+        score_mode: str = "jaccard",
+        n_permutations: int = 1000,
+        random_state: int = 0,
+        plot: str | bool = False,
+        matrix: str = "score",
+        annot: bool = True,
+        figsize: tuple[float, float] | None = None,
+    ) -> dict:
+        """Compare two obs columns (clusterings or any categorical labels).
+
+        Performs both many-to-one matching (every A label gets its best B
+        label and vice versa) and one-to-one optimal matching via the
+        Hungarian algorithm.  Hypergeometric enrichment and permutation-based
+        significance are computed for each match.
+
+        Args:
+            key_a: First obs column (e.g. ``"CL"``).
+            key_b: Second obs column (e.g. ``"sample_id"`` or ``"CL_ID"``).
+            score_mode: Matching criterion — ``"jaccard"`` (default),
+                ``"a"`` (fraction of A in B), ``"b"`` (fraction of B from A),
+                or ``"overlap"`` / ``None`` (raw count).
+            n_permutations: Permutations for global significance test.
+                Set to 0 to skip.
+            random_state: Random seed.
+            plot: ``False`` (default, no plot), ``"heatmap"`` (seaborn heatmap,
+                no dendrogram), or ``"clustermap"`` (seaborn clustermap with
+                row/column dendrograms).
+            matrix: Which values to display — ``"score"`` (default, the
+                scoring matrix used for matching) or ``"overlap"`` (raw cell
+                counts from the contingency table).
+            annot: Annotate each cell with its value.  Default ``True``.
+            figsize: Figure size passed to the plot.  When ``None`` a
+                sensible default is chosen based on the matrix dimensions.
+
+        Returns:
+            When ``plot=False``: the report ``dict``.
+            When ``plot`` is set: ``(report_dict, figure)`` where *figure* is
+            the ``matplotlib.figure.Figure`` for a heatmap or the
+            ``seaborn.ClusterGrid`` for a clustermap.
+
+            Report dict keys:
+
+            - ``A_to_B`` — every A label matched to its best B label
+            - ``B_to_A`` — every B label matched to its best A label
+            - ``one_to_one_matches`` — Hungarian optimal assignment
+            - ``contingency`` — raw overlap crosstab
+            - ``score_matrix`` — scoring matrix used for matching
+            - ``B_receives_from_A``, ``A_receives_from_B`` — split/merge structure
+            - ``ari``, ``nmi`` — global agreement metrics
+            - ``global_many_to_one_score_A_to_B``, ``_B_to_A``, ``_one_to_one``
+            - ``permutation_p_A_to_B``, ``_B_to_A``, ``_one_to_one``
+
+        Raises:
+            ValueError: If either key is not in ``adata.obs``, or ``plot``/
+                ``matrix`` are invalid values.
+        """
+        try:
+            from scipy.optimize import linear_sum_assignment
+            from scipy.stats import hypergeom
+        except ImportError as exc:
+            raise ImportError(
+                "match_clusterings requires scipy. Install with: pip install scipy"
+            ) from exc
+        try:
+            from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+        except ImportError as exc:
+            raise ImportError(
+                "match_clusterings requires scikit-learn. "
+                "Install with: pip install scikit-learn"
+            ) from exc
+        try:
+            from statsmodels.stats.multitest import multipletests
+        except ImportError as exc:
+            raise ImportError(
+                "match_clusterings requires statsmodels. "
+                "Install with: pip install statsmodels"
+            ) from exc
+
+        adata = self.read_adata()
+        for key in (key_a, key_b):
+            if key not in adata.obs.columns:
+                raise ValueError(
+                    f"'{key}' not found in adata.obs. "
+                    f"Available columns: {list(adata.obs.columns)}"
+                )
+
+        labels_a = adata.obs[key_a].astype(str).reset_index(drop=True)
+        labels_b = adata.obs[key_b].astype(str).reset_index(drop=True)
+
+        n = len(labels_a)
+        rng = np.random.default_rng(random_state)
+
+        def _make_score_matrix(a, b):
+            tab = pd.crosstab(a, b)
+            overlap = tab.to_numpy(dtype=float)
+            size_a = tab.sum(axis=1).to_numpy(dtype=float)[:, None]
+            size_b = tab.sum(axis=0).to_numpy(dtype=float)[None, :]
+            if score_mode is None or score_mode == "overlap":
+                vals = overlap
+            elif score_mode == "a":
+                vals = np.divide(overlap, size_a, out=np.zeros_like(overlap), where=size_a != 0)
+            elif score_mode == "b":
+                vals = np.divide(overlap, size_b, out=np.zeros_like(overlap), where=size_b != 0)
+            elif score_mode == "jaccard":
+                union = size_a + size_b - overlap
+                vals = np.divide(overlap, union, out=np.zeros_like(overlap), where=union != 0)
+            else:
+                raise ValueError(
+                    "score_mode must be one of None, 'overlap', 'jaccard', 'a', or 'b'."
+                )
+            return tab, pd.DataFrame(vals, index=tab.index, columns=tab.columns)
+
+        def _add_pair_stats(df):
+            df = df.copy()
+            expected, fold, pvals = [], [], []
+            for _, row in df.iterrows():
+                a_sz, b_sz, k = int(row["size_A"]), int(row["size_B"]), int(row["overlap"])
+                exp = a_sz * b_sz / n
+                expected.append(exp)
+                fold.append(k / exp if exp > 0 else float("nan"))
+                pvals.append(float(hypergeom.sf(k - 1, n, b_sz, a_sz)))
+            df["expected_overlap"] = expected
+            df["fold_enrichment"] = fold
+            df["hypergeom_p"] = pvals
+            if len(df) > 0:
+                df["hypergeom_q"] = multipletests(df["hypergeom_p"], method="fdr_bh")[1]
+            else:
+                df["hypergeom_q"] = []
+            return df
+
+        contingency, score_matrix = _make_score_matrix(labels_a, labels_b)
+
+        def _many_to_one(src_axis, src_col, dst_col, sort_frac_col):
+            best = score_matrix.idxmax(axis=src_axis)
+            rows = []
+            for src, dst in best.items():
+                if src_axis == 1:
+                    a_cl, b_cl = src, dst
+                else:
+                    a_cl, b_cl = dst, src
+                ov = contingency.loc[a_cl, b_cl]
+                sa = contingency.loc[a_cl, :].sum()
+                sb = contingency.loc[:, b_cl].sum()
+                sc = score_matrix.loc[a_cl, b_cl]
+                rows.append({
+                    src_col: src,
+                    dst_col: dst,
+                    "score": sc,
+                    "overlap": ov,
+                    "size_A": sa,
+                    "size_B": sb,
+                    "frac_A_in_B": ov / sa if sa > 0 else float("nan"),
+                    "frac_B_from_A": ov / sb if sb > 0 else float("nan"),
+                })
+            df = pd.DataFrame(rows)
+            df = _add_pair_stats(df)
+            return df.sort_values(
+                ["score", sort_frac_col, "fold_enrichment", "overlap"],
+                ascending=False,
+            ).reset_index(drop=True)
+
+        A_to_B = _many_to_one(1, "cluster_A", "matched_cluster_B", "frac_A_in_B")
+        B_to_A = _many_to_one(0, "cluster_B", "matched_cluster_A", "frac_B_from_A")
+
+        row_ind, col_ind = linear_sum_assignment(-score_matrix.to_numpy())
+        one_to_one = pd.DataFrame({
+            "cluster_A": score_matrix.index[row_ind],
+            "cluster_B": score_matrix.columns[col_ind],
+            "score": score_matrix.to_numpy()[row_ind, col_ind],
+            "overlap": contingency.to_numpy()[row_ind, col_ind],
+            "size_A": contingency.sum(axis=1).to_numpy()[row_ind],
+            "size_B": contingency.sum(axis=0).to_numpy()[col_ind],
+        })
+        one_to_one["frac_A_in_B"] = one_to_one["overlap"] / one_to_one["size_A"]
+        one_to_one["frac_B_from_A"] = one_to_one["overlap"] / one_to_one["size_B"]
+        one_to_one = _add_pair_stats(one_to_one)
+        one_to_one = one_to_one.sort_values(
+            ["score", "fold_enrichment", "overlap"], ascending=False
+        ).reset_index(drop=True)
+
+        ari = float(adjusted_rand_score(labels_a, labels_b))
+        nmi = float(normalized_mutual_info_score(labels_a, labels_b))
+
+        g_a2b = float(A_to_B["score"].sum())
+        g_b2a = float(B_to_A["score"].sum())
+        g_121 = float(one_to_one["score"].sum())
+
+        null_a2b = null_b2a = null_121 = None
+        p_a2b = p_b2a = p_121 = None
+
+        if n_permutations and n_permutations > 0:
+            null_a2b = np.empty(n_permutations)
+            null_b2a = np.empty(n_permutations)
+            null_121 = np.empty(n_permutations)
+            for i in range(n_permutations):
+                perm_b = labels_b.iloc[rng.permutation(n)].reset_index(drop=True)
+                _, ps = _make_score_matrix(labels_a, perm_b)
+                null_a2b[i] = ps.max(axis=1).sum()
+                null_b2a[i] = ps.max(axis=0).sum()
+                r, c = linear_sum_assignment(-ps.to_numpy())
+                null_121[i] = ps.to_numpy()[r, c].sum()
+            p_a2b = float((1 + np.sum(null_a2b >= g_a2b)) / (n_permutations + 1))
+            p_b2a = float((1 + np.sum(null_b2a >= g_b2a)) / (n_permutations + 1))
+            p_121 = float((1 + np.sum(null_121 >= g_121)) / (n_permutations + 1))
+
+        B_receives_from_A = (
+            A_to_B.groupby("matched_cluster_B")["cluster_A"]
+            .apply(list)
+            .reset_index()
+            .rename(columns={"matched_cluster_B": "cluster_B",
+                              "cluster_A": "A_clusters_mapping_to_B"})
+        )
+        B_receives_from_A["n_A_clusters"] = B_receives_from_A[
+            "A_clusters_mapping_to_B"
+        ].apply(len)
+
+        A_receives_from_B = (
+            B_to_A.groupby("matched_cluster_A")["cluster_B"]
+            .apply(list)
+            .reset_index()
+            .rename(columns={"matched_cluster_A": "cluster_A",
+                              "cluster_B": "B_clusters_mapping_to_A"})
+        )
+        A_receives_from_B["n_B_clusters"] = A_receives_from_B[
+            "B_clusters_mapping_to_A"
+        ].apply(len)
+
+        self._log_run_event(
+            "clusterings_matched",
+            {
+                "key_a": key_a,
+                "key_b": key_b,
+                "score_mode": score_mode,
+                "n_permutations": n_permutations,
+                "ari": ari,
+                "nmi": nmi,
+            },
+        )
+
+        report = {
+            "A_to_B": A_to_B,
+            "B_to_A": B_to_A,
+            "contingency": contingency,
+            "score_matrix": score_matrix,
+            "one_to_one_matches": one_to_one,
+            "unmatched_A_one_to_one": sorted(
+                set(contingency.index) - set(one_to_one["cluster_A"])
+            ),
+            "unmatched_B_one_to_one": sorted(
+                set(contingency.columns) - set(one_to_one["cluster_B"])
+            ),
+            "B_receives_from_A": B_receives_from_A,
+            "A_receives_from_B": A_receives_from_B,
+            "ari": ari,
+            "nmi": nmi,
+            "global_many_to_one_score_A_to_B": g_a2b,
+            "global_many_to_one_score_B_to_A": g_b2a,
+            "global_one_to_one_score": g_121,
+            "permutation_p_A_to_B": p_a2b,
+            "permutation_p_B_to_A": p_b2a,
+            "permutation_p_one_to_one": p_121,
+            "permutation_null_A_to_B": null_a2b,
+            "permutation_null_B_to_A": null_b2a,
+            "permutation_null_one_to_one": null_121,
+        }
+
+        if not plot:
+            return report
+
+        if plot not in ("heatmap", "clustermap"):
+            raise ValueError("plot must be False, 'heatmap', or 'clustermap'.")
+        if matrix not in ("score", "overlap"):
+            raise ValueError("matrix must be 'score' or 'overlap'.")
+
+        try:
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+        except ImportError as exc:
+            raise ImportError(
+                "Plotting match_clusterings requires matplotlib and seaborn."
+            ) from exc
+
+        plot_df = score_matrix if matrix == "score" else contingency.astype(float)
+        nr, nc = plot_df.shape
+        default_fs = (max(4, nc * 0.6 + 2), max(3, nr * 0.5 + 1.5))
+        fmt = ".2f" if matrix == "score" else "g"
+        title = (
+            f"{key_a} vs {key_b}  —  "
+            f"{matrix} matrix  |  ARI={ari:.3f}  NMI={nmi:.3f}"
+        )
+
+        if plot == "heatmap":
+            fig, ax = plt.subplots(figsize=figsize or default_fs)
+            sns.heatmap(
+                plot_df,
+                annot=annot,
+                fmt=fmt,
+                cmap="YlOrRd",
+                linewidths=0.3,
+                ax=ax,
+            )
+            ax.set_xlabel(key_b)
+            ax.set_ylabel(key_a)
+            ax.set_title(title)
+            fig.tight_layout()
+            return report, fig
+
+        # clustermap
+        grid = sns.clustermap(
+            plot_df,
+            annot=annot,
+            fmt=fmt,
+            cmap="YlOrRd",
+            linewidths=0.3,
+            figsize=figsize or (max(5, nc * 0.6 + 3), max(4, nr * 0.5 + 2.5)),
+        )
+        grid.ax_heatmap.set_xlabel(key_b)
+        grid.ax_heatmap.set_ylabel(key_a)
+        grid.figure.suptitle(title, y=1.02)
+        return report, grid
+
+    def plot_cluster_composition(
+        self,
+        cluster_key: str,
+        groupby: str,
+        normalize: str = "cluster",
+        palette=None,
+        figsize: tuple[float, float] | None = None,
+        legend_kwargs: dict | None = None,
+        ax=None,
+    ) -> tuple:
+        """Stacked bar chart of label composition.
+
+        Two modes controlled by ``normalize``:
+
+        - ``"cluster"`` *(default)* — one bar per cluster, showing the
+          fraction of cells in that cluster that come from each group (e.g.
+          sample).  Answers: *"what samples make up each cluster?"*
+        - ``"group"`` — one bar per group, showing the fraction of cells in
+          that group assigned to each cluster.  Answers: *"how are each
+          sample's cells distributed across clusters?"*
+
+        Args:
+            cluster_key: Obs column with cluster labels.
+            groupby: Obs column with group labels (e.g. ``"sample_id"``).
+            normalize: ``"cluster"`` or ``"group"``.
+            palette: Colour palette passed to seaborn.  ``None`` uses the
+                default categorical palette.
+            figsize: Figure size.  Defaults to a width proportional to the
+                number of bars.
+            legend_kwargs: Extra kwargs forwarded to ``ax.legend()``.
+            ax: Existing axes to draw on.
+
+        Returns:
+            ``(fig, ax)`` tuple.
+
+        Raises:
+            ValueError: If ``cluster_key`` or ``groupby`` are not in obs,
+                or ``normalize`` is not ``"cluster"`` or ``"group"``.
+        """
+        if normalize not in {"cluster", "group"}:
+            raise ValueError("normalize must be 'cluster' or 'group'")
+
+        try:
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+        except ImportError as exc:
+            raise ImportError(
+                "plot_cluster_composition requires matplotlib and seaborn."
+            ) from exc
+
+        adata = self.read_adata()
+        for key in (cluster_key, groupby):
+            if key not in adata.obs.columns:
+                raise ValueError(
+                    f"'{key}' not found in adata.obs. "
+                    f"Available columns: {list(adata.obs.columns)}"
+                )
+
+        ct = pd.crosstab(adata.obs[cluster_key].astype(str),
+                         adata.obs[groupby].astype(str))
+
+        if normalize == "cluster":
+            # rows = clusters, cols = groups → normalise across columns (groups)
+            props = ct.div(ct.sum(axis=1), axis=0)
+            xlabel = cluster_key
+            legend_title = groupby
+            hue_labels = ct.columns.tolist()
+        else:
+            # rows = clusters, cols = groups → normalise down rows (clusters per group)
+            props = ct.div(ct.sum(axis=0), axis=1)
+            # Transpose so x-axis = groups
+            props = props.T
+            xlabel = groupby
+            legend_title = cluster_key
+            hue_labels = props.columns.tolist()
+
+        n_bars = len(props)
+        n_hues = len(hue_labels)
+
+        if palette is None:
+            palette = sns.color_palette("tab20" if n_hues > 10 else "tab10", n_hues)
+        elif isinstance(palette, str):
+            palette = sns.color_palette(palette, n_hues)
+
+        if ax is None:
+            fig, ax = plt.subplots(
+                figsize=figsize or (max(4, 0.55 * n_bars + 1.5), 5)
+            )
+        else:
+            fig = ax.figure
+
+        bottoms = np.zeros(n_bars)
+        x = np.arange(n_bars)
+        for i, hue in enumerate(hue_labels):
+            vals = props[hue].to_numpy()
+            ax.bar(x, vals, bottom=bottoms, label=str(hue),
+                   color=palette[i % len(palette)], width=0.8)
+            bottoms += vals
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(props.index.tolist(), rotation=45, ha="right")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Proportion")
+        ax.set_ylim(0, 1)
+
+        lkw = {"title": legend_title, "bbox_to_anchor": (1.02, 1),
+                "loc": "upper left", "borderaxespad": 0}
+        if legend_kwargs:
+            lkw.update(legend_kwargs)
+        ax.legend(**lkw)
+
+        fig.tight_layout()
+        return fig, ax
 
     def plot_boxplot(
         self,
@@ -3208,8 +4380,8 @@ class Run:
         adata.uns["qc"]["latest"] = qc_record
 
         filtered = adata[keep_mask].copy()
-        filtered.write_zarr(self.zarr_path())
         self._adata = filtered
+        self._try_save_inplace(filtered)
         self._update_marker_variables(filtered)
         self._log_run_event(
             "qc_gated",
@@ -3374,8 +4546,7 @@ class Run:
         adata.uns["normalization"]["latest"] = summary
 
         if inplace:
-            adata.write_zarr(self.zarr_path())
-            self._adata = adata
+            self._try_save_inplace(adata)
 
         self._log_run_event(
             "run_normalized",
@@ -3657,8 +4828,7 @@ class Run:
         adata.uns["zscore"]["latest"] = summary
 
         if inplace:
-            adata.write_zarr(self.zarr_path())
-            self._adata = adata
+            self._try_save_inplace(adata)
 
         self._log_run_event(
             "run_zscored",
@@ -3771,6 +4941,74 @@ class Run:
             Path to Zarr file
         """
         return self.path / "processed" / f"{self.run_id}.zarr"
+
+    def _write_zarr(
+        self, adata: anndata.AnnData, zarr_path: Path | None = None
+    ) -> None:
+        """Write *adata* to zarr, converting PermissionErrors to ZarrLockedError."""
+        target = zarr_path or self.zarr_path()
+        try:
+            adata.write_zarr(target)
+        except PermissionError as exc:
+            locked: list[str] = []
+            if target.exists():
+                try:
+                    locked = get_locked_zarr_parts(target)
+                except Exception:
+                    pass
+            parts_str = (
+                ", ".join(f'"{p}"' for p in locked) if locked else "unknown parts"
+            )
+            raise ZarrLockedError(
+                f"Cannot write to run '{self.run_id}': zarr store is read-only "
+                f"(locked parts: {parts_str}). "
+                f"Call run.unlock_zarr_parts() to restore write access, "
+                f"or run.locked_zarr_parts() to inspect what is locked."
+            ) from exc
+
+    def _try_save_inplace(self, adata: anndata.AnnData | None = None) -> bool:
+        """Persist *adata* to disk; on ZarrLockedError warn and keep in memory.
+
+        Used by computation methods (``compute_umap``, ``cluster_leiden``, …)
+        when ``inplace=True``.  Unlike a direct ``save()`` call, this does not
+        crash: the result stays accessible via ``run.read_adata()`` and the
+        user is told how to persist it once the store is unlocked.
+
+        Returns:
+            ``True`` if the save succeeded, ``False`` if blocked by a lock.
+        """
+        import warnings as _warnings
+        if adata is not None:
+            self._adata = adata
+        try:
+            self.save()
+            return True
+        except ZarrLockedError as exc:
+            _warnings.warn(
+                f"Computation complete but result NOT saved to disk: {exc}  "
+                "Data is available in memory via run.read_adata(). "
+                "To persist: run.unlock_zarr_parts() then run.save().",
+                UserWarning,
+                stacklevel=3,
+            )
+            return False
+
+    def locked_zarr_parts(self) -> list[str]:
+        """Return which zarr store parts are currently locked (read-only).
+
+        Scans the run's zarr store and returns the logical parts — such as
+        ``"obs"``, ``"layers/raw"`` — that contain any read-only files.
+        An empty list means the store is fully writable.
+
+        Returns:
+            Sorted list of locked part paths.  ``["."]`` means the entire
+            store is locked.
+
+        Raises:
+            RunNotIngestedError: If the run has not been ingested yet.
+        """
+        self.require_ingested()
+        return get_locked_zarr_parts(self.zarr_path())
 
     def lock_zarr_parts(
         self,

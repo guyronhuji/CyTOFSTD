@@ -167,3 +167,6 @@ class MarkerRegistry:
         if len(marker) > 0:
             return marker.iloc[0].to_dict()
         return None
+
+
+__all__ = ["MarkerRegistry"]

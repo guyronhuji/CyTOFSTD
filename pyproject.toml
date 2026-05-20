@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cytofstandard"
-version = "0.1.1"
+version = "0.1.2"
 description = "Standard CyTOF analysis package"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,7 +18,8 @@ dependencies = [
   "pyyaml",
   "xxhash",
   "tqdm",
-  "fcsparser"
+  "fcsparser",
+  "flowsom"
 ]
 
 [tool.setuptools.packages.find]

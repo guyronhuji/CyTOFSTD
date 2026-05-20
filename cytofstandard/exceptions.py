@@ -43,3 +43,23 @@ class IngestionError(CytofStandardError):
 
 class FileFormatError(CytofStandardError):
     """Raised when file format is invalid."""
+
+
+class ZarrLockedError(CytofStandardError):
+    """Raised when a write is attempted on a read-only (locked) Zarr store part."""
+
+
+__all__ = [
+    "CytofStandardError",
+    "ProjectExistsError",
+    "ProjectValidationError",
+    "RunExistsError",
+    "RunNotFoundError",
+    "RunValidationError",
+    "RunNotIngestedError",
+    "MetadataValidationError",
+    "MarkerValidationError",
+    "IngestionError",
+    "FileFormatError",
+    "ZarrLockedError",
+]

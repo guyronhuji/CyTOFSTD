@@ -189,3 +189,18 @@ def log_ingestion_failed(
             "error": error,
         },
     )
+
+
+__all__ = [
+    "ProvenanceLogger",
+    "get_timestamp",
+    "log_project_created",
+    "log_project_loaded",
+    "log_run_registered",
+    "log_run_loaded",
+    "log_run_removed",
+    "log_run_renamed",
+    "log_ingestion_started",
+    "log_run_ingested",
+    "log_ingestion_failed",
+]

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-19T05:13:25.422905+00:00",
+  "generated_at": "2026-05-19T14:41:41.319861+00:00",
   "generator": "scripts/generate_api_docs.py",
   "package": "cytofstandard",
   "module_count": 14,
@@ -166,7 +166,7 @@
       "functions": [
         {
           "name": "read_fcs",
-          "signature": "(file_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]",
+          "signature": "(file_path: str, channel_naming: str = '$PnS') -> Tuple[pd.DataFrame, pd.DataFrame]",
           "summary": "Read an FCS file and return data and marker metadata.",
           "decorators": []
         }
@@ -404,6 +404,12 @@
           "bases": [],
           "methods": [
             {
+              "name": "annotate_clusters",
+              "signature": "(self, cluster_key: str, annotation_map: dict[str, str], output_key: str | None = None, inplace: bool = True) -> pd.Series",
+              "summary": "Map cluster labels to named cell types.",
+              "decorators": []
+            },
+            {
               "name": "cluster_leiden",
               "signature": "(self, embedding_name: str, cluster_key: str | None = None, resolution: float = 1.0, n_iterations: int = 2, beta: float = 0.01, objective_function: str = 'modularity', seed: int = 42, verbose: bool = False, inplace: bool = True) -> dict[str, Any]",
               "summary": "Cluster cells with Leiden using graph artifacts from an embedding.",
@@ -440,6 +446,12 @@
               "decorators": []
             },
             {
+              "name": "differential_abundance",
+              "signature": "(self, cluster_key: str, groupby: str, comparisons: str | list[tuple[str, str]] | None = 'all', method: str = 'fisher', multitest: str | None = 'bh', order: list[str] | None = None, plot: bool = False, figsize: tuple[float, float] | None = None, ax = None) -> pd.DataFrame | tuple[pd.DataFrame, tuple]",
+              "summary": "Test whether cluster proportions differ between groups.",
+              "decorators": []
+            },
+            {
               "name": "ingest",
               "signature": "(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, common_markers_only: bool = False, drop_columns: list[str] | None = None) -> None",
               "summary": "Ingest files into this run.",
@@ -458,6 +470,12 @@
               "decorators": []
             },
             {
+              "name": "match_clusterings",
+              "signature": "(self, key_a: str, key_b: str, score_mode: str = 'jaccard', n_permutations: int = 1000, random_state: int = 0) -> dict",
+              "summary": "Compare two obs columns (clusterings or any categorical labels).",
+              "decorators": []
+            },
+            {
               "name": "normalize_with_cytof_transform",
               "signature": "(self, control_markers: list[str], markers_to_correct: list[str], source_layer: str = 'raw', corrected_layer: str = 'normalized', z_layer: str = 'normalized_z', groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, anchor_to_median: bool = True, zscore: bool = True, module_name: str = 'cytof_transform', inplace: bool = True) -> dict[str, Any]",
               "summary": "Normalize markers using external cytof_transform, per sample/line group.",
@@ -473,6 +491,12 @@
               "name": "plot_boxplot",
               "signature": "(self, field: str, groupby, layer: str = 'X', order: list[str] | None = None, comparisons = None, test: str = 'mannwhitney', multitest: str | None = 'bh', show_points: bool = False, show_outliers: bool = True, max_points: int = 2000, point_alpha: float = 0.4, point_size: float = 2.0, palette = None, figsize: tuple[float, float] | None = None, ax = None, bracket_color: str = 'black', bracket_linewidth: float = 1.0, bracket_fontsize: float = 11.0, ns_label: str = 'ns', significance_thresholds: list[tuple[float, str]] | None = None, random_state: int = 0, boxplot_kwargs: dict | None = None, stripplot_kwargs: dict | None = None)",
               "summary": "Boxplot for a single field grouped by an obs column, with significance brackets.",
+              "decorators": []
+            },
+            {
+              "name": "plot_cluster_composition",
+              "signature": "(self, cluster_key: str, groupby: str, normalize: str = 'cluster', palette = None, figsize: tuple[float, float] | None = None, legend_kwargs: dict | None = None, ax = None) -> tuple",
+              "summary": "Stacked bar chart of label composition.",
               "decorators": []
             },
             {

@@ -41,3 +41,9 @@ def generate_file_uuid(project_id: str, file_path: str, file_hash: str) -> str:
     namespace = uuid.uuid5(uuid.NAMESPACE_DNS, project_id)
     uuid_input = f"{project_id}|file|{file_path}|{file_hash}"
     return str(uuid.uuid5(namespace, uuid_input))
+
+
+__all__ = [
+    "generate_cell_uuid",
+    "generate_file_uuid",
+]
