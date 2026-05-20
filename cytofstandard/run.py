@@ -4934,6 +4934,67 @@ class Run:
         )
         return new_run
 
+    def save_as_new_run(
+        self,
+        adata: anndata.AnnData,
+        new_run_id: str,
+        run_name: str | None = None,
+        notes: str | None = None,
+    ) -> "Run":
+        """Persist an arbitrary AnnData as a brand-new run in the same project.
+
+        Unlike ``save_adata(adata)``, which overwrites the *current* run, this
+        method registers a fresh run and writes the provided AnnData to it.
+        Panel metadata (panel_id, instrument, …) is copied from the source run.
+
+        Typical use case — save a balanced subsample without destroying the full
+        run's data::
+
+            adata_sub = run.subsample_by_group("sample_id", n_per_group=5000)
+            sub_run = run.save_as_new_run(adata_sub, new_run_id="CyTOF1_sub")
+
+        Args:
+            adata: AnnData to persist (e.g. from ``subsample_by_group``).
+            new_run_id: ID for the new run.  Must not already exist in the project.
+            run_name: Optional display name; defaults to
+                ``"<source run name> (subset)"``.
+            notes: Optional free-text notes attached to the new run's metadata.
+
+        Returns:
+            The newly created and saved ``Run`` object.
+        """
+        new_run = self.project.add_run(
+            run_id=new_run_id,
+            run_name=run_name
+            or f"{self.run_config.get('run_name', self.run_id)} (subset)",
+            panel_id=self.run_config.get("panel_id"),
+            acquisition_date=self.run_config.get("acquisition_date"),
+            instrument=self.run_config.get("instrument"),
+            operator=self.run_config.get("operator"),
+            notes=notes,
+        )
+        adata = adata.copy()
+        adata.uns["derived_from"] = {
+            "project_id": self.project.project_id,
+            "source_run_id": self.run_id,
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        new_run._adata = adata
+        new_run.save()
+        self._log_run_event(
+            "saved_as_new_run",
+            {
+                "new_run_id": new_run_id,
+                "n_cells_source": int(self.read_adata().n_obs),
+                "n_cells_new": int(adata.n_obs),
+            },
+        )
+        new_run._log_run_event(
+            "run_initialized_from_adata",
+            {"source_run_id": self.run_id, "n_cells": int(adata.n_obs)},
+        )
+        return new_run
+
     def zarr_path(self) -> Path:
         """Get the path to the Zarr file.
 
@@ -4962,12 +5023,15 @@ class Run:
         On macOS/Dropbox, ``shutil.rmtree`` inside zarr can fail with
         ``OSError: ENOTEMPTY`` because Finder or Dropbox inserts dot-files
         (e.g. ``.DS_Store``) between the recursive scan and the final
-        ``os.rmdir`` call.  We catch that case, strip the hidden files, and
-        retry once.
+        ``os.rmdir`` call.  We proactively strip those files before writing and
+        also catch-and-retry if they reappear during the write.
         """
         import errno as _errno
 
         target = zarr_path or self.zarr_path()
+        # Proactively remove dot-files so zarr's shutil.rmtree succeeds
+        if target.exists():
+            self._strip_hidden_files(target)
         try:
             adata.write_zarr(target)
         except PermissionError as exc:
@@ -4989,8 +5053,7 @@ class Run:
         except OSError as exc:
             if exc.errno != _errno.ENOTEMPTY:
                 raise
-            # macOS/Dropbox race: hidden dot-files blocked zarr's rmdir.
-            # Strip them and retry once — zarr will redo the full overwrite.
+            # Dot-files reappeared during the write — strip again and retry once.
             if target.exists():
                 self._strip_hidden_files(target)
             adata.write_zarr(target)
