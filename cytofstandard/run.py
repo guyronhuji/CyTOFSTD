@@ -4942,10 +4942,31 @@ class Run:
         """
         return self.path / "processed" / f"{self.run_id}.zarr"
 
+    @staticmethod
+    def _strip_hidden_files(path: Path) -> None:
+        """Remove dot-files (e.g. .DS_Store) that block rmdir on macOS/Dropbox."""
+        import os as _os
+        for root, _dirs, files in _os.walk(str(path)):
+            for fname in files:
+                if fname.startswith("."):
+                    try:
+                        _os.unlink(_os.path.join(root, fname))
+                    except OSError:
+                        pass
+
     def _write_zarr(
         self, adata: anndata.AnnData, zarr_path: Path | None = None
     ) -> None:
-        """Write *adata* to zarr, converting PermissionErrors to ZarrLockedError."""
+        """Write *adata* to zarr, converting PermissionErrors to ZarrLockedError.
+
+        On macOS/Dropbox, ``shutil.rmtree`` inside zarr can fail with
+        ``OSError: ENOTEMPTY`` because Finder or Dropbox inserts dot-files
+        (e.g. ``.DS_Store``) between the recursive scan and the final
+        ``os.rmdir`` call.  We catch that case, strip the hidden files, and
+        retry once.
+        """
+        import errno as _errno
+
         target = zarr_path or self.zarr_path()
         try:
             adata.write_zarr(target)
@@ -4965,6 +4986,14 @@ class Run:
                 f"Call run.unlock_zarr_parts() to restore write access, "
                 f"or run.locked_zarr_parts() to inspect what is locked."
             ) from exc
+        except OSError as exc:
+            if exc.errno != _errno.ENOTEMPTY:
+                raise
+            # macOS/Dropbox race: hidden dot-files blocked zarr's rmdir.
+            # Strip them and retry once — zarr will redo the full overwrite.
+            if target.exists():
+                self._strip_hidden_files(target)
+            adata.write_zarr(target)
 
     def _try_save_inplace(self, adata: anndata.AnnData | None = None) -> bool:
         """Persist *adata* to disk; on ZarrLockedError warn and keep in memory.
