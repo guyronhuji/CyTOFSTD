@@ -156,6 +156,14 @@ class Run:
         validate_sample_metadata(sample_df)
         validate_file_list(files, sample_df)
 
+        # Detect extra columns in the metadata CSV (beyond required + known optional).
+        # These will be carried through to adata.obs unchanged.
+        _known_sample_cols = {
+            "file_name", "sample_id", "line_id",
+            "condition", "replicate_id", "batch_id", "barcoding_id", "notes",
+        }
+        extra_sample_cols = [c for c in sample_df.columns if c not in _known_sample_cols]
+
         # Validate sample IDs are unique (per run)
         from cytofstandard.validation import validate_sample_id_unique
 
@@ -300,6 +308,10 @@ class Run:
                 if field in sample_info:
                     cell_metadata[field] = sample_info[field]
 
+            # Add extra sample metadata columns (any beyond the known set)
+            for col in extra_sample_cols:
+                cell_metadata[col] = sample_info[col]
+
             # Add CSV metadata if present (with prefix)
             for col in csv_meta_cols:
                 cell_metadata[f"csv_meta_{col}"] = data_df[col].values
@@ -355,7 +367,9 @@ class Run:
         ]
         optional_field_cols = set(optional_fields)
         csv_meta_cols_list = [f"csv_meta_{c}" for c in all_csv_meta_cols]
-        non_marker_cols = set(obs_cols) | optional_field_cols | set(csv_meta_cols_list)
+        non_marker_cols = (
+            set(obs_cols) | optional_field_cols | set(csv_meta_cols_list) | set(extra_sample_cols)
+        )
 
         marker_cols = sorted(c for c in combined.columns if c not in non_marker_cols)
         if common_markers_only:
@@ -371,6 +385,8 @@ class Run:
         for field in optional_fields:
             if field in combined.columns:
                 obs[field] = combined[field].values
+        for col in extra_sample_cols:
+            obs[col] = combined[col].values
         obs.index = obs["cell_uuid"].astype(str)
         obs.index.name = None
 
@@ -4063,6 +4079,827 @@ class Run:
 
         fig.tight_layout()
         return fig, ax
+
+    def vendi_score(
+        self,
+        k: int = 15,
+        markers: list[str] | None = None,
+        layer: str | None = None,
+        use_rep: str | None = None,
+        metric: str = "cosine",
+        obs_key: str = "vendi_score",
+        groupby: str | None = None,
+        sigma: float | None = None,
+        n_bins: int = 10,
+        n_reps: int = 1,
+        m: int | None = None,
+        random_state: int = 0,
+        return_eigenvalues: bool = False,
+        inplace: bool = True,
+    ) -> np.ndarray | pd.DataFrame | tuple[pd.DataFrame, dict[str, np.ndarray]]:
+        """Compute Vendi score over local k-NN neighborhoods or whole groups.
+
+        **Per-cell mode** (``groupby=None``): for each cell i, features of its
+        k-nearest-neighbor neighborhood N_k(i) are binned with
+        ``KBinsDiscretizer`` (uniform) then scored with
+        ``vendi_score.vendi.score_dual``.  With rarefaction (``n_reps > 1``),
+        results are bootstrap-averaged and 95 % CI bounds are also stored in
+        ``adata.obs`` as ``{obs_key}_ci_low`` / ``{obs_key}_ci_high``.
+
+        **Per-group mode** (``groupby`` set): for each unique value in the
+        chosen ``adata.obs`` column (e.g. cluster label or sample ID), all
+        cells belonging to that group are rarefied, binned, and scored.
+        Returns a DataFrame indexed by group with columns ``vendi_score``,
+        ``ci_low``, ``ci_high``, stored in ``adata.uns["vendi"][obs_key]``.
+
+        Args:
+            k: Number of nearest neighbors per cell (per-cell mode only).
+            markers: Subset of marker names (``adata.var_names``) to use as
+                features. ``None`` uses all markers. Ignored when ``use_rep``
+                is set.
+            layer: AnnData layer to use as the feature matrix. ``None`` uses
+                ``adata.X``.
+            use_rep: Key in ``adata.obsm`` to use instead of marker expression
+                (e.g. ``"X_umap"``). When provided, ``layer`` is ignored.
+            metric: ``"cosine"`` uses ``score_dual`` on binned features;
+                ``"rbf"`` builds a Gaussian kernel matrix and calls
+                ``score_K``.
+            obs_key: Storage key: ``adata.obs`` column (per-cell) or
+                ``adata.uns["vendi"]`` key (per-group).
+            groupby: ``adata.obs`` column to group by (e.g. ``"leiden"``,
+                ``"sample_id"``). When set, one score is produced per group.
+            sigma: Bandwidth for the RBF kernel. Defaults to the median
+                pairwise distance in the data.
+            n_bins: Number of uniform bins for ``KBinsDiscretizer``.
+            n_reps: Bootstrap repetitions. ``1`` scores once without
+                bootstrapping.
+            m: Subsample size per repetition. Defaults to pool size
+                (``k + 1`` per-cell, group size per-group).
+            random_state: Seed for the bootstrap RNG.
+            return_eigenvalues: Per-group mode only. When ``True``, also
+                compute the eigenvalue spectrum of the dual kernel for each
+                group (using the full binned pool, no subsampling) and return
+                ``(DataFrame, {group: eigenvalues_array})``. Eigenvalues are
+                also stored in ``adata.uns["vendi"][obs_key + "_eigenvalues"]``.
+            inplace: If ``True``, persist the updated AnnData to disk.
+
+        Returns:
+            Per-cell: ``np.ndarray`` of shape ``(n_cells,)`` stored in
+            ``adata.obs[obs_key]``.
+
+            Per-group (``return_eigenvalues=False``): ``pd.DataFrame`` indexed
+            by group label, stored in ``adata.uns["vendi"][obs_key]``.
+
+            Per-group (``return_eigenvalues=True``): ``(DataFrame, dict)``
+            where the dict maps each group label to a sorted
+            ``np.ndarray`` of eigenvalues (ascending).
+
+        Raises:
+            ValueError: If ``metric`` is invalid, ``groupby`` column is
+                missing, or the requested ``layer``/``use_rep`` does not exist.
+            RunNotIngestedError: If the run has not been ingested yet.
+        """
+        if metric not in {"cosine", "rbf"}:
+            raise ValueError("metric must be 'cosine' or 'rbf'")
+
+        try:
+            from sklearn.preprocessing import KBinsDiscretizer
+            from vendi_score.vendi import score_dual, score_K
+        except ImportError as exc:
+            raise ImportError(
+                "vendi_score requires vendi-score and scikit-learn. "
+                "Install with: pip install vendi-score scikit-learn"
+            ) from exc
+
+        self.require_ingested()
+        adata = self.read_adata()
+
+        # --- Extract feature matrix ---
+        if use_rep is not None:
+            if use_rep not in adata.obsm:
+                raise ValueError(
+                    f"use_rep '{use_rep}' not found in adata.obsm. "
+                    f"Available: {list(adata.obsm.keys())}"
+                )
+            X = np.asarray(adata.obsm[use_rep], dtype=np.float64)
+        else:
+            if layer is not None and layer not in adata.layers:
+                raise ValueError(
+                    f"layer '{layer}' not found in adata.layers. "
+                    f"Available: {list(adata.layers.keys())}"
+                )
+            raw = adata.layers[layer] if layer is not None else adata.X
+            X = np.asarray(
+                raw.toarray() if hasattr(raw, "toarray") else raw,
+                dtype=np.float64,
+            )
+            if markers is not None:
+                var_names = adata.var_names.tolist()
+                missing = [mk for mk in markers if mk not in var_names]
+                if missing:
+                    raise ValueError(
+                        f"Markers not found in adata.var_names: {missing}"
+                    )
+                col_idx = [var_names.index(mk) for mk in markers]
+                X = X[:, col_idx]
+
+        rng = np.random.default_rng(random_state)
+        binner = KBinsDiscretizer(
+            n_bins=n_bins, strategy="uniform", encode="ordinal"
+        )
+
+        def _score_pool(pool: np.ndarray, m_size: int) -> float:
+            import warnings as _w
+            sub = pool[rng.choice(len(pool), m_size, replace=False)] if m_size < len(pool) else pool
+            with _w.catch_warnings():
+                _w.filterwarnings("ignore", message=".*constant.*", category=UserWarning)
+                MM = binner.fit_transform(sub)
+            if metric == "cosine":
+                return float(score_dual(MM, normalize=True))
+            diff = MM[:, np.newaxis, :] - MM[np.newaxis, :, :]
+            sq_dist = np.sum(diff**2, axis=-1)
+            K = np.exp(-sq_dist / (2.0 * sigma**2))
+            return float(score_K(K))
+
+        def _run_reps(pool: np.ndarray, m_size: int) -> tuple[float, float, float]:
+            if n_reps == 1:
+                return _score_pool(pool, m_size), float("nan"), float("nan")
+            vals = np.array([_score_pool(pool, m_size) for _ in range(n_reps)])
+            lo, hi = np.quantile(vals, [0.025, 0.975])
+            return float(vals.mean()), float(lo), float(hi)
+
+        def _eigenvalues_pool(pool: np.ndarray) -> np.ndarray:
+            """Eigenvalues of the dual kernel on the full binned pool (ascending)."""
+            import scipy.linalg as _la
+            from sklearn.preprocessing import normalize as _normalize
+            MM = binner.fit_transform(pool)
+            if metric == "cosine":
+                MM = _normalize(MM, axis=1)
+                S = MM.T @ MM / len(MM)
+            else:
+                diff = MM[:, np.newaxis, :] - MM[np.newaxis, :, :]
+                sq_dist = np.sum(diff**2, axis=-1)
+                S = np.exp(-sq_dist / (2.0 * sigma**2)) / len(MM)
+            return _la.eigvalsh(S)
+
+        # ------------------------------------------------------------------ #
+        # Per-group mode                                                       #
+        # ------------------------------------------------------------------ #
+        if groupby is not None:
+            if groupby not in adata.obs.columns:
+                raise ValueError(
+                    f"groupby '{groupby}' not found in adata.obs. "
+                    f"Available: {list(adata.obs.columns)}"
+                )
+
+            if metric == "rbf" and sigma is None:
+                sample_idx = rng.choice(len(X), min(2000, len(X)), replace=False)
+                Xs = X[sample_idx]
+                flat_dists = np.linalg.norm(
+                    Xs[:, np.newaxis, :] - Xs[np.newaxis, :, :], axis=-1
+                ).ravel()
+                flat_dists = flat_dists[flat_dists > 0]
+                sigma = float(np.median(flat_dists)) if len(flat_dists) else 1.0
+
+            groups = adata.obs[groupby]
+            group_labels = (
+                groups.cat.categories.tolist()
+                if hasattr(groups, "cat")
+                else sorted(groups.unique().tolist())
+            )
+
+            rows: dict[str, dict[str, float]] = {}
+            eigenvalues: dict[str, np.ndarray] = {}
+            for label in group_labels:
+                pool = X[(groups == label).values]
+                if len(pool) == 0:
+                    continue
+                m_size = min(m, len(pool)) if m is not None else len(pool)
+                if m_size < 1:
+                    continue
+                mean_v, lo, hi = _run_reps(pool, m_size)
+                rows[label] = {"vendi_score": mean_v, "ci_low": lo, "ci_high": hi}
+                if return_eigenvalues:
+                    eigenvalues[label] = _eigenvalues_pool(pool)
+
+            result_df = pd.DataFrame.from_dict(rows, orient="index")
+            result_df.index.name = groupby
+
+            vendi_uns = adata.uns.setdefault("vendi", {})
+            vendi_uns[obs_key] = result_df.to_dict()
+            if return_eigenvalues:
+                vendi_uns[f"{obs_key}_eigenvalues"] = {
+                    k: v.tolist() for k, v in eigenvalues.items()
+                }
+
+            if inplace:
+                self._try_save_inplace(adata)
+            else:
+                self._adata = adata
+
+            if return_eigenvalues:
+                return result_df, eigenvalues
+            return result_df
+
+        # ------------------------------------------------------------------ #
+        # Per-cell mode                                                        #
+        # ------------------------------------------------------------------ #
+        n_cells = X.shape[0]
+        if k >= n_cells:
+            raise ValueError(
+                f"k={k} must be less than the number of cells ({n_cells})"
+            )
+
+        try:
+            from scipy.spatial import KDTree
+        except ImportError as exc:
+            raise ImportError("vendi_score requires scipy") from exc
+
+        # For cosine KNN, normalize rows so Euclidean distance ≡ cosine distance.
+        if metric == "cosine":
+            norms = np.linalg.norm(X, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            X_feat = X / norms
+        else:
+            X_feat = X
+
+        tree = KDTree(X_feat)
+        query_dists, knn_idx = tree.query(X_feat, k=k + 1)
+
+        if metric == "rbf" and sigma is None:
+            knn_dists = query_dists[:, 1:]
+            median_dist = float(np.median(knn_dists[knn_dists > 0]))
+            sigma = median_dist if median_dist > 0 else 1.0
+
+        neigh_size = k + 1
+        m_eff = min(m, neigh_size) if m is not None else neigh_size
+        store_ci = n_reps > 1
+
+        scores = np.empty(n_cells, dtype=np.float64)
+        if store_ci:
+            ci_low = np.empty(n_cells, dtype=np.float64)
+            ci_high = np.empty(n_cells, dtype=np.float64)
+
+        for i in range(n_cells):
+            mean_v, lo, hi = _run_reps(X[knn_idx[i]], m_eff)
+            scores[i] = mean_v
+            if store_ci:
+                ci_low[i] = lo
+                ci_high[i] = hi
+
+        adata.obs[obs_key] = scores
+        if store_ci:
+            adata.obs[f"{obs_key}_ci_low"] = ci_low
+            adata.obs[f"{obs_key}_ci_high"] = ci_high
+
+        if inplace:
+            self._try_save_inplace(adata)
+        else:
+            self._adata = adata
+
+        return scores
+
+    # ------------------------------------------------------------------ #
+    # Random Matrix Theory spectrum                                        #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _rmt_one_group(
+        X,
+        matrix,
+        sigma_sq,
+        compute_eigvecs=False,
+    ):
+        """Eigenvalue spectrum and Marchenko-Pastur bounds for one cell group.
+
+        Args:
+            X: Expression matrix (n_cells x p_markers), already centred and
+                optionally standardised.
+            matrix: ``"marker_cov"`` for the p x p covariance matrix;
+                ``"cell_gram"`` for the n x n Gram matrix X @ X.T / p.
+            sigma_sq: Noise variance for the MP distribution.  ``None``
+                estimates it as ``trace(C) / p``.
+            compute_eigvecs: When ``True``, include eigenvectors under
+                ``"eigvecs"`` (columns in descending eigenvalue order).
+                Only meaningful for ``"marker_cov"``.
+
+        Returns:
+            Dict with keys ``eigenvalues`` (descending ndarray), ``eigvecs``
+            (optional p x p ndarray), ``lambda_max_mp``, ``lambda_min_mp``,
+            ``n_signal``, ``q``, ``sigma_sq``, ``n``, ``p``.
+        """
+        import scipy.linalg as _la
+
+        n, p = X.shape
+        if matrix == "marker_cov":
+            C = X.T @ X / n
+            if compute_eigvecs:
+                eigvals_asc, eigvecs_asc = _la.eigh(C)
+                eigvals = eigvals_asc[::-1].copy()
+                eigvecs = eigvecs_asc[:, ::-1].copy()
+            else:
+                eigvals = _la.eigvalsh(C)[::-1].copy()
+                eigvecs = None
+            q = p / n
+            s2 = sigma_sq if sigma_sq is not None else float(np.trace(C) / p)
+        else:
+            G = X @ X.T / p
+            eigvals = _la.eigvalsh(G)[::-1].copy()
+            eigvecs = None
+            q = p / n
+            effective_scale = n / p
+            s2 = (sigma_sq if sigma_sq is not None else 1.0) * effective_scale
+
+        lam_max = s2 * (1.0 + np.sqrt(q)) ** 2
+        lam_min = s2 * max(0.0, 1.0 - np.sqrt(q)) ** 2
+        n_signal = int(np.sum(eigvals > lam_max))
+
+        out = dict(
+            eigenvalues=eigvals,
+            lambda_max_mp=float(lam_max),
+            lambda_min_mp=float(lam_min),
+            n_signal=n_signal,
+            q=float(q),
+            sigma_sq=float(s2),
+            n=int(n),
+            p=int(p),
+        )
+        if compute_eigvecs and eigvecs is not None:
+            out["eigvecs"] = eigvecs
+        return out
+
+    def compute_rmt_spectrum(
+        self,
+        markers=None,
+        layer=None,
+        groupby=None,
+        matrix="marker_cov",
+        standardize=True,
+        n_cells=10_000,
+        sigma_sq=None,
+        random_state=0,
+        uns_key="rmt_spectrum",
+        plot=False,
+        inplace=True,
+    ):
+        """Compute the marker eigenvalue spectrum and compare to the Marchenko-Pastur null.
+
+        Uses Random Matrix Theory (RMT) to identify which principal components
+        of the marker covariance (or cell Gram) matrix represent genuine
+        biological signal vs. sampling noise.  Eigenvalues above the MP upper
+        bound ``lambda_max = sigma2 * (1 + sqrt(q))^2`` are classed as signal.
+
+        The Marchenko-Pastur law states that for a random n x p matrix with
+        i.i.d. entries of variance sigma2, the eigenvalues of the sample
+        covariance ``C = X.T @ X / n`` lie within
+        ``[sigma2*(1-sqrt(q))^2, sigma2*(1+sqrt(q))^2]`` with ``q = p/n``.
+
+        Args:
+            markers: Subset of marker names to use.  ``None`` uses all markers.
+            layer: AnnData layer to use.  ``None`` uses ``adata.X``.
+            groupby: ``adata.obs`` column to group by.  When set, the spectrum
+                is computed separately per group.
+            matrix: ``"marker_cov"`` (default) builds the p x p marker
+                covariance matrix.  ``"cell_gram"`` builds the n x n cell Gram
+                matrix ``X @ X.T / p`` on a subsampled cell set.
+            standardize: If ``True``, centre and scale each marker to zero mean
+                and unit variance before analysis.  For ``"marker_cov"`` this
+                yields a correlation matrix (sigma2 = 1 under the null).
+            n_cells: Maximum cells per group.  Randomly subsampled when larger.
+            sigma_sq: Noise variance for the MP distribution.  ``None``
+                auto-estimates as ``trace(C) / p``.
+            random_state: Seed for subsampling.
+            uns_key: Key under which results are stored in ``adata.uns``.
+            plot: If ``True``, return ``(result, fig)`` with a scree plot.
+            inplace: If ``True``, persist the updated AnnData to disk.
+
+        Returns:
+            Result dict (or ``(dict, Figure)`` when ``plot=True``).  Contains
+            ``eigenvalues``, ``lambda_max_mp``, ``lambda_min_mp``,
+            ``n_signal``, ``q``, ``sigma_sq``, ``n``, ``p``, ``markers``,
+            ``matrix``.  With ``groupby``, nested under ``"groups"``.
+
+        Raises:
+            ValueError: Invalid parameter values or missing data.
+            RunNotIngestedError: Run has not been ingested.
+        """
+        if matrix not in {"marker_cov", "cell_gram"}:
+            raise ValueError("matrix must be 'marker_cov' or 'cell_gram'")
+
+        self.require_ingested()
+        adata = self.read_adata()
+
+        if layer is not None and layer not in {"X", "x"} and layer not in adata.layers:
+            raise ValueError(
+                f"layer '{layer}' not found. Available: {list(adata.layers.keys())}"
+            )
+        raw = adata.layers[layer] if layer is not None else adata.X
+        X_full = np.asarray(
+            raw.toarray() if hasattr(raw, "toarray") else raw,
+            dtype=np.float64,
+        )
+        if markers is not None:
+            var_names = adata.var_names.tolist()
+            missing = [mk for mk in markers if mk not in var_names]
+            if missing:
+                raise ValueError(f"Markers not found in adata.var_names: {missing}")
+            col_idx = [var_names.index(mk) for mk in markers]
+            X_full = X_full[:, col_idx]
+            marker_names = list(markers)
+        else:
+            marker_names = adata.var_names.tolist()
+
+        rng = np.random.default_rng(random_state)
+
+        def _prep(X):
+            if n_cells is not None and len(X) > n_cells:
+                idx = rng.choice(len(X), n_cells, replace=False)
+                X = X[idx]
+            X = X - X.mean(axis=0)
+            if standardize:
+                std = X.std(axis=0)
+                std[std == 0] = 1.0
+                X = X / std
+            return X
+
+        def _one(X):
+            res = self._rmt_one_group(_prep(X), matrix=matrix, sigma_sq=sigma_sq)
+            return {**res, "eigenvalues": res["eigenvalues"].tolist()}
+
+        if groupby is not None:
+            if groupby not in adata.obs.columns:
+                raise ValueError(
+                    f"groupby '{groupby}' not found in adata.obs. "
+                    f"Available: {list(adata.obs.columns)}"
+                )
+            groups = adata.obs[groupby]
+            group_labels = (
+                groups.cat.categories.tolist()
+                if hasattr(groups, "cat")
+                else sorted(groups.unique().tolist())
+            )
+            group_results = {}
+            for label in group_labels:
+                pool = X_full[(groups == label).values]
+                if len(pool) < 2:
+                    continue
+                group_results[label] = _one(pool)
+            result = {
+                "matrix": matrix,
+                "groupby": groupby,
+                "markers": marker_names,
+                "groups": group_results,
+            }
+        else:
+            res = _one(X_full)
+            result = {"matrix": matrix, "markers": marker_names, **res}
+
+        adata.uns[uns_key] = result
+
+        if inplace:
+            self._try_save_inplace(adata)
+        else:
+            self._adata = adata
+
+        if not plot:
+            return result
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as exc:
+            raise ImportError("plot=True requires matplotlib") from exc
+
+        def _draw_one(ax, gres, title):
+            eigvals = np.asarray(gres["eigenvalues"])
+            lam_max = gres["lambda_max_mp"]
+            lam_min = gres["lambda_min_mp"]
+            ranks = np.arange(1, len(eigvals) + 1)
+            colors = ["#E06C2B" if v > lam_max else "#AAAAAA" for v in eigvals]
+            ax.bar(ranks, eigvals, color=colors, width=0.8, zorder=2)
+            ax.axhline(lam_max, color="#333333", linestyle="--", linewidth=1.2,
+                       label=f"MP upper bound ({lam_max:.3f})")
+            if lam_min > 0:
+                ax.axhline(lam_min, color="#888888", linestyle=":", linewidth=1.0,
+                           label=f"MP lower bound ({lam_min:.3f})")
+            ax.set_xlabel("Component rank")
+            ax.set_ylabel("Eigenvalue")
+            ax.set_title(f"{title}  (n_signal = {gres['n_signal']})")
+            ax.legend(fontsize=8)
+            ax.set_xlim(0.5, len(eigvals) + 0.5)
+
+        if groupby is not None:
+            items = list(result["groups"].items())
+            ncols = min(3, len(items))
+            nrows = (len(items) + ncols - 1) // ncols
+            fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows),
+                                     squeeze=False)
+            for idx, (label, gres) in enumerate(items):
+                _draw_one(axes[idx // ncols][idx % ncols], gres, str(label))
+            for idx in range(len(items), nrows * ncols):
+                axes[idx // ncols][idx % ncols].set_visible(False)
+            q_repr = list(result["groups"].values())[0]["q"] if result["groups"] else float("nan")
+        else:
+            fig, ax = plt.subplots(figsize=(max(6, len(result["eigenvalues"]) * 0.4), 4))
+            _draw_one(ax, result, "All cells")
+            q_repr = result["q"]
+
+        fig.suptitle(f"RMT eigenvalue spectrum — {matrix}  (q = {q_repr:.4f})", fontsize=10)
+        fig.tight_layout()
+        return result, fig
+
+    def bootstrap_rmt_spectrum(
+        self,
+        markers=None,
+        layer=None,
+        groupby=None,
+        matrix="marker_cov",
+        standardize=True,
+        n_cells=10_000,
+        frac=0.8,
+        n_bootstrap=200,
+        random_state=0,
+        uns_key="rmt_bootstrap",
+        plot=False,
+        inplace=True,
+    ):
+        """Bootstrap stability of the RMT eigenvalue spectrum.
+
+        Repeatedly subsamples a fraction of cells and recomputes the
+        eigenvalue spectrum to quantify estimation uncertainty.
+
+        - **Eigenvalue distributions**: spread of each rank's eigenvalue
+          across resamples — tight = well-estimated, wide = noisy.
+        - **Eigenvector stability** (``matrix="marker_cov"`` only): mean
+          absolute cosine similarity between the reference eigenvector and
+          each bootstrap replicate.  Near 1 = reproducible; near 0 = unstable.
+
+        These complement the MP boundary from :meth:`compute_rmt_spectrum`:
+        RMT says "above the noise floor"; bootstrap says "stably estimated".
+
+        Args:
+            markers: Subset of marker names to use.  ``None`` uses all.
+            layer: AnnData layer to use.  ``None`` uses ``adata.X``.
+            groupby: ``adata.obs`` column to group by.
+            matrix: ``"marker_cov"`` or ``"cell_gram"``.
+            standardize: Centre and scale each marker before analysis.
+            n_cells: Maximum cell pool size per group before bootstrapping.
+            frac: Fraction of the pool drawn without replacement per replicate.
+            n_bootstrap: Number of bootstrap resamples.
+            random_state: Seed for the RNG.
+            uns_key: Key under which results are stored in ``adata.uns``.
+            plot: If ``True``, return ``(result, fig)`` with a two-panel
+                figure: eigenvalue distributions and eigenvector stability.
+            inplace: If ``True``, persist the updated AnnData to disk.
+
+        Returns:
+            Result dict (or ``(dict, Figure)`` when ``plot=True``).  Contains
+            ``eigenvalue_ref``, ``eigenvalue_matrix`` (n_bootstrap x p),
+            ``eigenvalue_mean``, ``eigenvalue_std``, ``eigenvalue_ci_low``,
+            ``eigenvalue_ci_high``, ``eigenvector_stability`` (marker_cov
+            only), ``lambda_max_mp_ref``, ``lambda_max_mp_distribution``,
+            ``n_signal_ref``, ``markers``, ``matrix``.
+            With ``groupby``, nested under ``"groups"``.
+
+        Raises:
+            ValueError: Invalid parameter values or missing data.
+            RunNotIngestedError: Run has not been ingested.
+        """
+        if matrix not in {"marker_cov", "cell_gram"}:
+            raise ValueError("matrix must be 'marker_cov' or 'cell_gram'")
+        if not (0.0 < frac < 1.0):
+            raise ValueError("frac must be in (0, 1)")
+
+        self.require_ingested()
+        adata = self.read_adata()
+
+        if layer is not None and layer not in {"X", "x"} and layer not in adata.layers:
+            raise ValueError(
+                f"layer '{layer}' not found. Available: {list(adata.layers.keys())}"
+            )
+        raw = adata.layers[layer] if layer is not None else adata.X
+        X_full = np.asarray(
+            raw.toarray() if hasattr(raw, "toarray") else raw,
+            dtype=np.float64,
+        )
+        if markers is not None:
+            var_names = adata.var_names.tolist()
+            missing = [mk for mk in markers if mk not in var_names]
+            if missing:
+                raise ValueError(f"Markers not found in adata.var_names: {missing}")
+            col_idx = [var_names.index(mk) for mk in markers]
+            X_full = X_full[:, col_idx]
+            marker_names = list(markers)
+        else:
+            marker_names = adata.var_names.tolist()
+
+        rng = np.random.default_rng(random_state)
+
+        def _prep_pool(X):
+            if n_cells is not None and len(X) > n_cells:
+                idx = rng.choice(len(X), n_cells, replace=False)
+                X = X[idx]
+            X = X - X.mean(axis=0)
+            if standardize:
+                std = X.std(axis=0)
+                std[std == 0] = 1.0
+                X = X / std
+            return X
+
+        def _bootstrap_one(X):
+            import scipy.linalg as _la
+
+            n, p = X.shape
+            n_sub = max(2, int(np.floor(frac * n)))
+
+            ref = self._rmt_one_group(
+                X, matrix=matrix, sigma_sq=None,
+                compute_eigvecs=(matrix == "marker_cov"),
+            )
+            ref_eigvals = ref["eigenvalues"]
+            ref_eigvecs = ref.get("eigvecs")
+            lam_max_ref = ref["lambda_max_mp"]
+            sigma_sq_ref = ref["sigma_sq"]
+
+            n_comp = p if matrix == "marker_cov" else min(n_sub, p)
+
+            boot_eigvals = np.empty((n_bootstrap, n_comp), dtype=np.float64)
+            boot_stab = (
+                np.zeros(n_comp, dtype=np.float64)
+                if matrix == "marker_cov" else None
+            )
+            boot_lam_max = np.empty(n_bootstrap, dtype=np.float64)
+
+            for b in range(n_bootstrap):
+                idx_b = rng.choice(n, n_sub, replace=False)
+                Xb = X[idx_b]
+
+                if matrix == "marker_cov":
+                    Cb = Xb.T @ Xb / n_sub
+                    eigvals_b_asc, eigvecs_b_asc = _la.eigh(Cb)
+                    eigvals_b = eigvals_b_asc[::-1]
+                    eigvecs_b = eigvecs_b_asc[:, ::-1]
+                    boot_eigvals[b] = eigvals_b[:n_comp]
+                    for r in range(n_comp):
+                        dot = float(ref_eigvecs[:, r] @ eigvecs_b[:, r])
+                        boot_stab[r] += abs(dot)
+                    q_b = p / n_sub
+                    boot_lam_max[b] = sigma_sq_ref * (1.0 + np.sqrt(q_b)) ** 2
+                else:
+                    Gb = Xb @ Xb.T / p
+                    eigvals_b = _la.eigvalsh(Gb)[::-1]
+                    boot_eigvals[b] = eigvals_b[:n_comp]
+                    q_b = p / n_sub
+                    s2_sub = 1.0 * (n_sub / p)
+                    boot_lam_max[b] = s2_sub * (1.0 + np.sqrt(q_b)) ** 2
+
+            eigvec_stability = boot_stab / n_bootstrap if boot_stab is not None else None
+
+            ci_low = np.percentile(boot_eigvals, 2.5, axis=0)
+            ci_high = np.percentile(boot_eigvals, 97.5, axis=0)
+
+            out = dict(
+                eigenvalue_ref=ref_eigvals[:n_comp].tolist(),
+                eigenvalue_matrix=boot_eigvals.tolist(),
+                eigenvalue_mean=boot_eigvals.mean(axis=0).tolist(),
+                eigenvalue_std=boot_eigvals.std(axis=0).tolist(),
+                eigenvalue_ci_low=ci_low.tolist(),
+                eigenvalue_ci_high=ci_high.tolist(),
+                lambda_max_mp_ref=float(lam_max_ref),
+                lambda_max_mp_distribution=boot_lam_max.tolist(),
+                n_signal_ref=ref["n_signal"],
+                q_ref=float(ref["q"]),
+                n=int(n),
+                p=int(p),
+                n_sub=int(n_sub),
+            )
+            if eigvec_stability is not None:
+                out["eigenvector_stability"] = eigvec_stability.tolist()
+            return out
+
+        if groupby is not None:
+            if groupby not in adata.obs.columns:
+                raise ValueError(
+                    f"groupby '{groupby}' not found in adata.obs. "
+                    f"Available: {list(adata.obs.columns)}"
+                )
+            groups = adata.obs[groupby]
+            group_labels = (
+                groups.cat.categories.tolist()
+                if hasattr(groups, "cat")
+                else sorted(groups.unique().tolist())
+            )
+            group_results = {}
+            for label in group_labels:
+                pool = X_full[(groups == label).values]
+                if len(pool) < 4:
+                    continue
+                group_results[label] = _bootstrap_one(_prep_pool(pool))
+            result = {
+                "matrix": matrix,
+                "groupby": groupby,
+                "markers": marker_names,
+                "n_bootstrap": n_bootstrap,
+                "frac": frac,
+                "groups": group_results,
+            }
+        else:
+            bres = _bootstrap_one(_prep_pool(X_full))
+            result = {
+                "matrix": matrix,
+                "markers": marker_names,
+                "n_bootstrap": n_bootstrap,
+                "frac": frac,
+                **bres,
+            }
+
+        adata.uns[uns_key] = result
+
+        if inplace:
+            self._try_save_inplace(adata)
+        else:
+            self._adata = adata
+
+        if not plot:
+            return result
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as exc:
+            raise ImportError("plot=True requires matplotlib") from exc
+
+        def _draw_group(axes_pair, gres, title):
+            ax_eig, ax_stab = axes_pair
+            eigvals_mat = np.asarray(gres["eigenvalue_matrix"])
+            ref_vals = np.asarray(gres["eigenvalue_ref"])
+            ci_low_arr = np.asarray(gres["eigenvalue_ci_low"])
+            lam_max_ref = gres["lambda_max_mp_ref"]
+            lam_max_dist = np.asarray(gres["lambda_max_mp_distribution"])
+            n_comp = eigvals_mat.shape[1]
+            ranks = np.arange(1, n_comp + 1)
+
+            for r in range(n_comp):
+                col = "#E06C2B" if ci_low_arr[r] > lam_max_ref else "#AAAAAA"
+                vp = ax_eig.violinplot(
+                    eigvals_mat[:, r], positions=[r + 1], widths=0.7,
+                    showmedians=False, showextrema=False,
+                )
+                for pc in vp["bodies"]:
+                    pc.set_facecolor(col)
+                    pc.set_alpha(0.7)
+            ax_eig.scatter(ranks, ref_vals, color="#222222", s=18, zorder=5,
+                           label="Reference eigenvalue")
+            ax_eig.axhline(lam_max_ref, color="#333333", linestyle="--",
+                           linewidth=1.2, label=f"MP bound ({lam_max_ref:.3f})")
+            mp_med = float(np.median(lam_max_dist))
+            mp_std = float(np.std(lam_max_dist))
+            ax_eig.axhspan(mp_med - mp_std, mp_med + mp_std, color="#CCCCCC",
+                           alpha=0.3, label="MP bound +/- 1 SD")
+            ax_eig.set_xlabel("Component rank")
+            ax_eig.set_ylabel("Eigenvalue")
+            ax_eig.set_title(f"{title} — eigenvalue distributions")
+            ax_eig.set_xlim(0.5, n_comp + 0.5)
+            ax_eig.legend(fontsize=7)
+
+            if "eigenvector_stability" in gres:
+                stab = np.asarray(gres["eigenvector_stability"])
+                bar_colors = [
+                    "#2CA02C" if s >= 0.9 else ("#FFAA00" if s >= 0.7 else "#D62728")
+                    for s in stab
+                ]
+                ax_stab.bar(ranks, stab, color=bar_colors, width=0.8)
+                ax_stab.axhline(0.9, color="#333333", linestyle="--",
+                                linewidth=1.0, label="Stability threshold (0.9)")
+                ax_stab.set_ylim(0, 1.05)
+                ax_stab.set_xlabel("Component rank")
+                ax_stab.set_ylabel("|cos theta| (mean across bootstrap)")
+                ax_stab.set_title(f"{title} — eigenvector stability")
+                ax_stab.set_xlim(0.5, n_comp + 0.5)
+                ax_stab.legend(fontsize=7)
+            else:
+                ax_stab.text(
+                    0.5, 0.5,
+                    "Eigenvector stability\nnot available for cell_gram",
+                    ha="center", va="center",
+                    transform=ax_stab.transAxes, fontsize=9,
+                )
+
+        if groupby is not None:
+            items = list(result["groups"].items())
+            ngroups = len(items)
+            fig, axes = plt.subplots(ngroups, 2, figsize=(12, 4 * ngroups), squeeze=False)
+            for i, (label, gres) in enumerate(items):
+                _draw_group(axes[i], gres, str(label))
+        else:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            _draw_group(axes, result, "All cells")
+
+        fig.suptitle(
+            f"Bootstrap RMT spectrum — {matrix}"
+            f"  (n_bootstrap={n_bootstrap}, frac={frac})",
+            fontsize=10,
+        )
+        fig.tight_layout()
+        return result, fig
 
     @staticmethod
     def _build_comparison_pairs(order, comparisons):

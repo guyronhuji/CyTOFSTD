@@ -582,3 +582,66 @@ Args:
 
 Returns:
     Summary dictionary with balancing and z-score metadata.
+
+##### `compute_rmt_spectrum(self, markers=None, layer=None, groupby=None, matrix='marker_cov', standardize=True, n_cells=10000, sigma_sq=None, random_state=0, uns_key='rmt_spectrum', plot=False, inplace=True)`
+
+Compute the marker eigenvalue spectrum and compare to the Marchenko-Pastur null.
+
+Uses Random Matrix Theory (RMT) to identify which principal components of the
+marker covariance (or cell Gram) matrix represent genuine biological signal vs.
+sampling noise.  Eigenvalues above `lambda_max = sigma2 * (1 + sqrt(q))^2` are
+classed as signal, where `q = p/n` is the aspect ratio.
+
+Args:
+    markers: Subset of marker names. `None` uses all markers.
+    layer: AnnData layer. `None` uses `adata.X`.
+    groupby: `adata.obs` column to group by. When set, spectrum is computed
+        per group.
+    matrix: `"marker_cov"` (default) builds the p x p marker covariance.
+        `"cell_gram"` builds the n x n cell Gram matrix `X @ X.T / p`.
+    standardize: Centre and scale each marker to unit variance. For
+        `"marker_cov"` this yields a correlation matrix (sigma2=1 under null).
+    n_cells: Max cells per group (randomly subsampled when larger).
+    sigma_sq: Noise variance for MP. `None` auto-estimates as `trace(C)/p`.
+    random_state: Seed for subsampling.
+    uns_key: Storage key in `adata.uns`.
+    plot: If `True`, return `(result, fig)` with a scree plot.
+    inplace: If `True`, persist to disk.
+
+Returns:
+    Result dict with `eigenvalues`, `lambda_max_mp`, `lambda_min_mp`,
+    `n_signal`, `q`, `sigma_sq`, `n`, `p`, `markers`, `matrix`.
+    With `groupby`, results are nested under `"groups"`.
+    Returns `(dict, Figure)` when `plot=True`.
+
+##### `bootstrap_rmt_spectrum(self, markers=None, layer=None, groupby=None, matrix='marker_cov', standardize=True, n_cells=10000, frac=0.8, n_bootstrap=200, random_state=0, uns_key='rmt_bootstrap', plot=False, inplace=True)`
+
+Bootstrap stability of the RMT eigenvalue spectrum.
+
+Repeatedly subsamples a fraction of cells and recomputes the eigenvalue
+spectrum to quantify estimation uncertainty.  For `matrix="marker_cov"` also
+reports eigenvector stability as mean |cos θ| per component.
+
+Args:
+    markers: Subset of marker names. `None` uses all.
+    layer: AnnData layer. `None` uses `adata.X`.
+    groupby: `adata.obs` column to group by.
+    matrix: `"marker_cov"` or `"cell_gram"`.
+    standardize: Centre and scale each marker before analysis.
+    n_cells: Max cell pool size per group before bootstrapping.
+    frac: Fraction of pool drawn without replacement per replicate.
+    n_bootstrap: Number of bootstrap resamples.
+    random_state: Seed for the RNG.
+    uns_key: Storage key in `adata.uns`.
+    plot: If `True`, return `(result, fig)` with eigenvalue distribution
+        violins and eigenvector stability bar chart.
+    inplace: If `True`, persist to disk.
+
+Returns:
+    Result dict with `eigenvalue_ref`, `eigenvalue_matrix`, `eigenvalue_mean`,
+    `eigenvalue_std`, `eigenvalue_ci_low`, `eigenvalue_ci_high`,
+    `eigenvector_stability` (marker_cov only), `lambda_max_mp_ref`,
+    `lambda_max_mp_distribution`, `n_signal_ref`, `markers`, `matrix`.
+    With `groupby`, nested under `"groups"`.
+    Returns `(dict, Figure)` when `plot=True`.
+

@@ -9,12 +9,11 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from _shared import get_run, render_sidebar  # noqa: E402
+from _shared import get_run, page_header, render_sidebar  # noqa: E402
 
 st.set_page_config(page_title="Analysis | CyTOF Standard", layout="wide")
 render_sidebar()
-
-st.title("📊 Analysis")
+page_header("Analysis", subtitle="Differential abundance, cluster composition, and marker heatmaps", icon="📊")
 
 run = get_run()
 
@@ -24,20 +23,13 @@ if run.status != "ingested":
 
 adata = run.read_adata()
 
-# Reusable column sets
-all_obs_cols = [c for c in adata.obs.columns if c not in {"cell_uuid", "source_file", "source_file_hash", "event_index"}]
-cluster_cols = [
-    c for c in adata.obs.columns
-    if "leiden" in c.lower() or "cluster" in c.lower() or "annotated" in c.lower()
-]
-group_cols = [c for c in all_obs_cols if c not in cluster_cols]
+all_obs_cols  = [c for c in adata.obs.columns if c not in {"cell_uuid", "source_file", "source_file_hash", "event_index"}]
+cluster_cols  = [c for c in adata.obs.columns if "leiden" in c.lower() or "cluster" in c.lower() or "annotated" in c.lower()]
+group_cols    = [c for c in all_obs_cols if c not in cluster_cols]
 
-# -----------------------------------------------------------------------
 tab1, tab2, tab3 = st.tabs(["Differential Abundance", "Cluster Composition", "Marker Heatmap"])
 
-# -----------------------------------------------------------------------
-# Tab 1 — Differential abundance
-# -----------------------------------------------------------------------
+# ── Tab 1: Differential abundance ────────────────────────────────────────────
 with tab1:
     st.subheader("Differential cluster abundance")
     st.write("Tests whether cluster proportions differ significantly between groups.")
@@ -49,10 +41,10 @@ with tab1:
     else:
         col_a, col_b = st.columns(2)
         da_cluster_key = col_a.selectbox("Cluster column", cluster_cols, key="da_ck")
-        da_groupby     = col_b.selectbox("Group by", group_cols, key="da_gb")
+        da_groupby     = col_b.selectbox("Group by",       group_cols,   key="da_gb")
 
-        da_method   = st.radio("Test", ["fisher", "chi2"], horizontal=True)
-        da_multitest = st.radio("Multiple testing", ["bh", "bonferroni", "none"], horizontal=True)
+        da_method    = st.radio("Test",             ["fisher", "chi2"],             horizontal=True)
+        da_multitest = st.radio("Multiple testing", ["bh", "bonferroni", "none"],   horizontal=True)
         da_multitest_val = None if da_multitest == "none" else da_multitest
 
         if st.button("Run differential abundance", type="primary"):
@@ -69,20 +61,12 @@ with tab1:
                     buf = io.BytesIO()
                     fig.savefig(buf, bbox_inches="tight", dpi=300)
                     buf.seek(0)
-                    st.download_button(
-                        "Download plot",
-                        buf,
-                        "differential_abundance.png",
-                        "image/png",
-                        key="da_download",
-                    )
+                    st.download_button("Download plot", buf, "differential_abundance.png", "image/png", key="da_dl")
                     st.dataframe(result_df, use_container_width=True, hide_index=True)
                 except Exception as exc:
                     st.error(f"Differential abundance failed: {exc}")
 
-# -----------------------------------------------------------------------
-# Tab 2 — Cluster composition
-# -----------------------------------------------------------------------
+# ── Tab 2: Cluster composition ────────────────────────────────────────────────
 with tab2:
     st.subheader("Cluster composition")
     st.write("Stacked bar chart showing how each cluster is composed by group, or vice versa.")
@@ -94,7 +78,7 @@ with tab2:
     else:
         col_a, col_b = st.columns(2)
         cc_cluster_key = col_a.selectbox("Cluster column", cluster_cols, key="cc_ck")
-        cc_groupby     = col_b.selectbox("Group by", group_cols, key="cc_gb")
+        cc_groupby     = col_b.selectbox("Group by",       group_cols,   key="cc_gb")
 
         normalize = st.radio(
             "Normalize",
@@ -114,19 +98,11 @@ with tab2:
                     buf = io.BytesIO()
                     fig.savefig(buf, bbox_inches="tight", dpi=300)
                     buf.seek(0)
-                    st.download_button(
-                        "Download plot",
-                        buf,
-                        "cluster_composition.png",
-                        "image/png",
-                        key="cc_download",
-                    )
+                    st.download_button("Download plot", buf, "cluster_composition.png", "image/png", key="cc_dl")
                 except Exception as exc:
                     st.error(f"Cluster composition failed: {exc}")
 
-# -----------------------------------------------------------------------
-# Tab 3 — Marker heatmap
-# -----------------------------------------------------------------------
+# ── Tab 3: Marker heatmap ─────────────────────────────────────────────────────
 with tab3:
     st.subheader("Marker heatmap")
     st.write("Mean (or median) marker expression per group, shown as a heatmap.")
@@ -143,9 +119,9 @@ with tab3:
             default=all_markers[:min(20, len(all_markers))],
         )
         hm_groupby = st.selectbox("Group by", group_cols + cluster_cols, key="hm_gb")
-        hm_agg = st.radio("Aggregation", ["mean", "median"], horizontal=True)
-        hm_scale = st.radio("Standard scale", ["none", "row", "column"], horizontal=True,
-                            help="Apply z-scoring across rows (markers) or columns (groups).")
+        hm_agg     = st.radio("Aggregation",    ["mean", "median"],              horizontal=True)
+        hm_scale   = st.radio("Standard scale", ["none", "row", "column"],       horizontal=True,
+                              help="Z-score across rows (markers) or columns (groups).")
         hm_scale_val = None if hm_scale == "none" else hm_scale
 
         if st.button("Plot heatmap", type="primary", disabled=not hm_markers):
@@ -161,12 +137,6 @@ with tab3:
                     buf = io.BytesIO()
                     fig.savefig(buf, bbox_inches="tight", dpi=300)
                     buf.seek(0)
-                    st.download_button(
-                        "Download plot",
-                        buf,
-                        "marker_heatmap.png",
-                        "image/png",
-                        key="hm_download",
-                    )
+                    st.download_button("Download plot", buf, "marker_heatmap.png", "image/png", key="hm_dl")
                 except Exception as exc:
                     st.error(f"Heatmap failed: {exc}")

@@ -7,7 +7,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from _shared import _load_project, render_sidebar  # noqa: E402
+from _shared import _load_project, page_header, render_sidebar  # noqa: E402
 
 st.set_page_config(
     page_title="CyTOF Standard",
@@ -16,11 +16,7 @@ st.set_page_config(
 )
 
 render_sidebar()
-
-st.title("🔬 CyTOF Standard")
-st.write("A guided interface for CyTOF mass cytometry analysis.")
-
-st.divider()
+page_header("CyTOF Standard", subtitle="Mass cytometry analysis platform", icon="🔬")
 
 
 def _pick_folder() -> str | None:
@@ -51,7 +47,7 @@ def _pick_folder() -> str | None:
 col_browse, col_text = st.columns([1, 4])
 
 with col_browse:
-    st.write("")  # vertical alignment spacer
+    st.write("")
     if st.button("📁 Browse…", use_container_width=True):
         chosen = _pick_folder()
         if chosen:
@@ -62,7 +58,7 @@ with col_text:
         "Project folder",
         value=st.session_state.get("project_path_input", st.session_state.get("project_path", "")),
         placeholder="/path/to/my_cytof_project",
-        help="Path to the CyTOF Standard project directory. Use Browse… or type directly.",
+        help="Path to the CyTOF Standard project directory.",
         key="project_path_input",
         label_visibility="collapsed",
     )
@@ -85,9 +81,7 @@ if st.button("Load project", type="primary"):
         except Exception as exc:
             st.error(f"Could not load project: {exc}")
 
-# -----------------------------------------------------------------------
-# Loaded project info + navigation
-# -----------------------------------------------------------------------
+# ── Loaded project info ───────────────────────────────────────────────────────
 if st.session_state.get("project_path"):
     path = st.session_state["project_path"]
     try:
@@ -95,14 +89,29 @@ if st.session_state.get("project_path"):
         runs_df = proj.list_runs()
         n_runs = len(runs_df)
 
-        st.success(f"Project loaded: **{Path(path).name}** — {n_runs} run{'s' if n_runs != 1 else ''}")
+        n_ingested   = int((runs_df["status"] == "ingested").sum())   if not runs_df.empty else 0
+        n_registered = int((runs_df["status"] == "registered").sum()) if not runs_df.empty else 0
 
-        st.markdown("### Navigation")
-        cols = st.columns(4)
-        cols[0].page_link("pages/1_Overview.py",  label="Overview",  icon="📋")
-        cols[1].page_link("pages/3_QC.py",         label="QC",        icon="🔍")
-        cols[2].page_link("pages/4_Explore.py",    label="Explore",   icon="🗺️")
-        cols[3].page_link("pages/5_Analysis.py",   label="Analysis",  icon="📊")
+        st.divider()
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Project", Path(path).name)
+        c2.metric("Total runs", n_runs)
+        c3.metric("Ingested", n_ingested)
+
+        st.markdown("")
+        st.markdown(
+            '<p style="font-family:\'IBM Plex Mono\',monospace; font-size:0.65rem; '
+            'text-transform:uppercase; letter-spacing:0.12em; color:#6E7681; margin-bottom:0.5rem;">Navigate</p>',
+            unsafe_allow_html=True,
+        )
+
+        nav_cols = st.columns(5)
+        nav_cols[0].page_link("pages/1_Overview.py",  label="Overview",  icon="📋")
+        nav_cols[1].page_link("pages/3_QC.py",         label="QC",        icon="🔍")
+        nav_cols[2].page_link("pages/6_Compute.py",    label="Compute",   icon="⚙️")
+        nav_cols[3].page_link("pages/4_Explore.py",    label="Explore",   icon="🗺️")
+        nav_cols[4].page_link("pages/5_Analysis.py",   label="Analysis",  icon="📊")
 
     except Exception as exc:
         st.error(f"Error reading project: {exc}")

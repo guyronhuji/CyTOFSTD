@@ -376,3 +376,33 @@ def test_run_uses_intra_extra_column_for_marker_partition(
 
     assert "H3" in run.markers_intracellular
     assert "ECad" in run.markers_extracellular
+
+
+def test_extra_sample_metadata_columns_in_obs(
+    temp_dir, csv_project, simple_csv_file, sample_metadata_file
+):
+    """Extra columns in the sample metadata CSV appear in adata.obs."""
+    run = csv_project.add_run(run_id="run_001")
+
+    raw_dir = csv_project.path / "runs" / "run_001" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(simple_csv_file, raw_dir / simple_csv_file.name)
+
+    sample_df = pd.read_csv(sample_metadata_file)
+    sample_df["file_name"] = simple_csv_file.name
+    sample_df["treatment"] = "ctrl"
+    sample_df["passage_number"] = 5
+    sample_df.to_csv(sample_metadata_file, index=False)
+
+    run.ingest(
+        files=[str(raw_dir / simple_csv_file.name)],
+        sample_metadata=str(sample_metadata_file),
+        copy_raw=False,
+        strict_markers=True,
+    )
+
+    adata = run.read_adata()
+    assert "treatment" in adata.obs.columns
+    assert "passage_number" in adata.obs.columns
+    assert (adata.obs["treatment"] == "ctrl").all()
+    assert (adata.obs["passage_number"] == 5).all()

@@ -240,6 +240,39 @@ Significance brackets use:
 | `<= 0.001`  | `***`  |
 | `<= 0.0001` | `****` |
 
+
+## Random Matrix Theory Spectrum
+
+Identify which marker PCs represent genuine biology vs. noise using the
+Marchenko-Pastur (MP) null distribution.
+
+```python
+# Marker covariance mode (p x p, fast, works on any n)
+result = run.compute_rmt_spectrum(
+    matrix="marker_cov",   # or "cell_gram" for the n x n Gram matrix
+    standardize=True,      # use correlation matrix (sigma2=1 under null)
+    n_cells=10_000,        # subsample cap per group
+    groupby="condition",   # None for whole dataset
+    plot=True,             # returns (result, fig)
+)
+# result["n_signal"]      – number of eigenvalues above the MP bound
+# result["lambda_max_mp"] – MP upper bound λ_max = σ²(1+√q)²
+# result["eigenvalues"]   – descending list of eigenvalues
+
+# Check stability of the spectrum via bootstrap resampling
+boot, fig = run.bootstrap_rmt_spectrum(
+    matrix="marker_cov",
+    frac=0.8,          # fraction of cells per resample
+    n_bootstrap=200,
+    plot=True,
+)
+# boot["eigenvector_stability"] – mean |cos θ| per component (marker_cov only)
+# boot["eigenvalue_ci_low"]     – 2.5th percentile per rank across resamples
+```
+
+Both results are stored in `adata.uns` (keys `"rmt_spectrum"` and
+`"rmt_bootstrap"` by default) and persisted automatically when `inplace=True`.
+
 ## API Documentation
 
 This repository includes generated API description files:
