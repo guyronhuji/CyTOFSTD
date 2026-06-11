@@ -4088,7 +4088,7 @@ class Run:
         use_rep: str | None = None,
         metric: str = "cosine",
         obs_key: str = "vendi_score",
-        groupby: str | None = None,
+        groupby: str | list[str] | None = None,
         sigma: float | None = None,
         n_bins: int = 10,
         n_reps: int = 1,
@@ -4106,11 +4106,13 @@ class Run:
         results are bootstrap-averaged and 95 % CI bounds are also stored in
         ``adata.obs`` as ``{obs_key}_ci_low`` / ``{obs_key}_ci_high``.
 
-        **Per-group mode** (``groupby`` set): for each unique value in the
-        chosen ``adata.obs`` column (e.g. cluster label or sample ID), all
-        cells belonging to that group are rarefied, binned, and scored.
-        Returns a DataFrame indexed by group with columns ``vendi_score``,
-        ``ci_low``, ``ci_high``, stored in ``adata.uns["vendi"][obs_key]``.
+        **Per-group mode** (``groupby`` set): for each unique value (or
+        combination of values when ``groupby`` is a list) in the chosen
+        ``adata.obs`` column(s), all cells belonging to that group are
+        rarefied, binned, and scored.  Returns a DataFrame indexed by group
+        label (MultiIndex when ``groupby`` is a list) with columns
+        ``vendi_score``, ``ci_low``, ``ci_high``, stored in
+        ``adata.uns["vendi"][obs_key]``.
 
         Args:
             k: Number of nearest neighbors per cell (per-cell mode only).
@@ -4126,8 +4128,9 @@ class Run:
                 ``score_K``.
             obs_key: Storage key: ``adata.obs`` column (per-cell) or
                 ``adata.uns["vendi"]`` key (per-group).
-            groupby: ``adata.obs`` column to group by (e.g. ``"leiden"``,
-                ``"sample_id"``). When set, one score is produced per group.
+            groupby: ``adata.obs`` column(s) to group by (e.g. ``"leiden"``,
+                ``["condition", "cell_cycle"]``). When a list is given, one
+                score is produced per unique combination of values.
             sigma: Bandwidth for the RBF kernel. Defaults to the median
                 pairwise distance in the data.
             n_bins: Number of uniform bins for ``KBinsDiscretizer``.
@@ -4246,9 +4249,11 @@ class Run:
         # Per-group mode                                                       #
         # ------------------------------------------------------------------ #
         if groupby is not None:
-            if groupby not in adata.obs.columns:
+            groupby_cols = [groupby] if isinstance(groupby, str) else list(groupby)
+            missing_cols = [c for c in groupby_cols if c not in adata.obs.columns]
+            if missing_cols:
                 raise ValueError(
-                    f"groupby '{groupby}' not found in adata.obs. "
+                    f"groupby columns not found in adata.obs: {missing_cols}. "
                     f"Available: {list(adata.obs.columns)}"
                 )
 
@@ -4261,14 +4266,18 @@ class Run:
                 flat_dists = flat_dists[flat_dists > 0]
                 sigma = float(np.median(flat_dists)) if len(flat_dists) else 1.0
 
-            groups = adata.obs[groupby]
-            group_labels = (
-                groups.cat.categories.tolist()
-                if hasattr(groups, "cat")
-                else sorted(groups.unique().tolist())
-            )
+            if len(groupby_cols) == 1:
+                groups = adata.obs[groupby_cols[0]]
+                group_labels = (
+                    groups.cat.categories.tolist()
+                    if hasattr(groups, "cat")
+                    else sorted(groups.unique().tolist())
+                )
+            else:
+                groups = adata.obs[groupby_cols].apply(tuple, axis=1)
+                group_labels = sorted(groups.unique().tolist())
 
-            rows: dict[str, dict[str, float]] = {}
+            rows: dict = {}
             eigenvalues: dict[str, np.ndarray] = {}
             for label in group_labels:
                 pool = X[(groups == label).values]
@@ -4280,13 +4289,24 @@ class Run:
                 mean_v, lo, hi = _run_reps(pool, m_size)
                 rows[label] = {"vendi_score": mean_v, "ci_low": lo, "ci_high": hi}
                 if return_eigenvalues:
-                    eigenvalues[label] = _eigenvalues_pool(pool)
+                    # use string key for eigenvalues storage (tuples aren't JSON-safe)
+                    eig_key = "|".join(str(v) for v in label) if isinstance(label, tuple) else str(label)
+                    eigenvalues[eig_key] = _eigenvalues_pool(pool)
 
             result_df = pd.DataFrame.from_dict(rows, orient="index")
-            result_df.index.name = groupby
+            if len(groupby_cols) == 1:
+                result_df.index.name = groupby_cols[0]
+            else:
+                result_df.index = pd.MultiIndex.from_tuples(
+                    result_df.index.tolist(), names=groupby_cols
+                )
+
+            # Serialize for uns storage: convert tuple keys to pipe-separated strings
+            def _uns_key(lbl) -> str:
+                return "|".join(str(v) for v in lbl) if isinstance(lbl, tuple) else str(lbl)
 
             vendi_uns = adata.uns.setdefault("vendi", {})
-            vendi_uns[obs_key] = result_df.to_dict()
+            vendi_uns[obs_key] = {_uns_key(lbl): v for lbl, v in rows.items()}
             if return_eigenvalues:
                 vendi_uns[f"{obs_key}_eigenvalues"] = {
                     k: v.tolist() for k, v in eigenvalues.items()
