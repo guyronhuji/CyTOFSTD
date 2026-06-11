@@ -4277,9 +4277,15 @@ class Run:
                 groups = adata.obs[groupby_cols].apply(tuple, axis=1)
                 group_labels = sorted(groups.unique().tolist())
 
+            try:
+                from tqdm.auto import tqdm as _tqdm
+            except ImportError:
+                def _tqdm(iterable, **_):
+                    return iterable
+
             rows: dict = {}
             eigenvalues: dict[str, np.ndarray] = {}
-            for label in group_labels:
+            for label in _tqdm(group_labels, desc="Vendi score (groups)", unit="group"):
                 pool = X[(groups == label).values]
                 if len(pool) == 0:
                     continue
@@ -4355,12 +4361,18 @@ class Run:
         m_eff = min(m, neigh_size) if m is not None else neigh_size
         store_ci = n_reps > 1
 
+        try:
+            from tqdm.auto import tqdm as _tqdm
+        except ImportError:
+            def _tqdm(iterable, **_):
+                return iterable
+
         scores = np.empty(n_cells, dtype=np.float64)
         if store_ci:
             ci_low = np.empty(n_cells, dtype=np.float64)
             ci_high = np.empty(n_cells, dtype=np.float64)
 
-        for i in range(n_cells):
+        for i in _tqdm(range(n_cells), desc="Vendi score (cells)", unit="cell"):
             mean_v, lo, hi = _run_reps(X[knn_idx[i]], m_eff)
             scores[i] = mean_v
             if store_ci:
