@@ -5722,7 +5722,6 @@ class Run:
         thresholds: dict[str, float] | None = None,
         quantile_thresholds: dict[str, float] | None = None,
         threshold_methods: dict[str, str] | None = None,
-        ambiguous_ki67_prb: bool = True,
         inplace: bool = True,
     ) -> dict[str, Any]:
         """Assign cells to cell-cycle phases using hierarchical marker gating.
@@ -5732,19 +5731,18 @@ class Run:
         calibrated for arcsinh-scale values.
 
         Gating hierarchy (mutually exclusive, applied in order):
-          IdU+              → S_phase
-          pH3+              → M_phase
-          CyclinB1+         → G2_phase
-          Ki67+ & pRb+      → Cycling_G1
-          Ki67+ & pRb-      → Early_G1_or_ambiguous (when ambiguous_ki67_prb=True)
-          Ki67-             → G0_or_quiescent
-          remaining         → Unclassified
+          IdU+      → S_phase
+          pH3+      → M_phase
+          CyclinB1+ → G2_phase
+          pRb+      → Cycling_G1   (if pRb in marker_map)
+          pRb-      → G0_or_quiescent
+          remaining → G1_or_quiescent (when pRb absent)
 
         Args:
             marker_map: Dict mapping role → actual ``var_name`` column.
                 Required roles: ``IdU``, ``pH3``, ``CyclinB1``.
-                Optional: ``Ki67``, ``pRb``. If ``None``, auto-detection is
-                attempted from ``adata.var_names`` using known aliases.
+                Optional: ``pRb``. If ``None``, auto-detection is attempted
+                from ``adata.var_names`` using known aliases.
             layer: AnnData layer to read expression from. ``None`` uses
                 ``adata.X`` (typically arcsinh-transformed after ingestion).
                 Avoid ``"zscore"`` — thresholds are not calibrated for it.
@@ -5754,10 +5752,8 @@ class Run:
                 (used when strategy is ``"quantile"``).
             threshold_methods: Per-role auto-threshold strategy.
                 ``"otsu"`` (default for IdU/pH3/CyclinB1) finds the valley in
-                bimodal distributions. ``"quantile"`` (default for Ki67/pRb)
-                uses a fixed percentile.
-            ambiguous_ki67_prb: Split Ki67+/pRb- cells into
-                ``Early_G1_or_ambiguous``. Default True.
+                bimodal distributions. ``"quantile"`` (default for pRb) uses
+                a fixed percentile.
             inplace: Persist updated AnnData to disk after gating.
 
         Returns:
@@ -5799,7 +5795,6 @@ class Run:
             quantile_thresholds=quantile_thresholds,
             threshold_methods=threshold_methods,
             apply_arcsinh=False,
-            ambiguous_ki67_prb=ambiguous_ki67_prb,
             return_adata=True,
         )
 
@@ -5814,7 +5809,6 @@ class Run:
             "marker_map": marker_map,
             "thresholds": result["thresholds"],
             "layer": layer,
-            "ambiguous_ki67_prb": ambiguous_ki67_prb,
             "n_cells": int(adata.n_obs),
         }
 

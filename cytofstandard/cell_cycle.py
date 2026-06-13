@@ -1,10 +1,10 @@
-"""Cell-cycle gating for CyTOF data using IdU, pH3, CyclinB1, Ki67, and pRb.
+"""Cell-cycle gating for CyTOF data using IdU, pH3, CyclinB1, and pRb.
 
 Implements a transparent, rule-based exclusion hierarchy:
   IdU → S phase
   pH3 → M phase
   CyclinB1 → G2 phase
-  Ki67 / pRb → Cycling G1 vs G0/quiescent
+  pRb → Cycling G1 vs G0/quiescent
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ CELL_CYCLE_MARKER_ALIASES: dict[str, list[str]] = {
     "IdU": ["IdU", "IDU", "BrdU", "IdU_BrdU", "5-iodo-2'-deoxyuridine"],
     "pH3": ["pH3", "pHH3", "H3S10ph", "H3S28ph", "H3pS28", "H3pS10", "pHH3_S28", "pHH3_S10"],
     "CyclinB1": ["CyclinB1", "Cyclin B1", "CCNB1", "Cyclin_B1", "CycB1", "cyclinB1"],
-    "Ki67": ["Ki67", "KI67", "MKI67", "Ki-67", "ki67"],
     "pRb": ["pRb", "phospho-Rb", "pRB", "Rb_phospho", "pRb_S807", "Rb_S807", "Rb_pS807"],
 }
 
@@ -36,7 +35,6 @@ DEFAULT_THRESHOLD_METHODS: dict[str, str] = {
     "IdU": "otsu",
     "pH3": "otsu",
     "CyclinB1": "otsu",
-    "Ki67": "quantile",
     "pRb": "quantile",
 }
 
@@ -45,18 +43,16 @@ DEFAULT_QUANTILE_THRESHOLDS: dict[str, float] = {
     "IdU": 0.95,
     "pH3": 0.98,
     "CyclinB1": 0.85,
-    "Ki67": 0.60,
     "pRb": 0.60,
 }
 
 REQUIRED_ROLES: set[str] = {"IdU", "pH3", "CyclinB1"}
-OPTIONAL_ROLES: set[str] = {"Ki67", "pRb"}
+OPTIONAL_ROLES: set[str] = {"pRb"}
 
 PHASE_ORDER: list[str] = [
     "G0_or_quiescent",
     "G1_or_quiescent",
     "Cycling_G1",
-    "Early_G1_or_ambiguous",
     "S_phase",
     "G2_phase",
     "M_phase",
@@ -64,16 +60,13 @@ PHASE_ORDER: list[str] = [
 ]
 
 PHASE_COLORS: dict[str, str] = {
-    # Hues match the notebook manual gating: G0=grey, G1=blue, S=green, G2=orange, M=red.
-    # Sub-phases use a lighter tint of the parent hue.
-    "G0_or_quiescent":      "#9e9e9e",  # = manual G0
-    "G1_or_quiescent":      "#bdbdbd",  # light grey (G0/G1 ambiguous)
-    "Cycling_G1":           "#1f77b4",  # = manual G1
-    "Early_G1_or_ambiguous":"#aec7e8",  # light blue (early/ambiguous G1)
-    "S_phase":              "#2ca02c",  # = manual S
-    "G2_phase":             "#ff7f0e",  # = manual G2
-    "M_phase":              "#d62728",  # = manual M
-    "Unclassified":         "#aaaaaa",
+    "G0_or_quiescent": "#9e9e9e",  # = manual G0
+    "G1_or_quiescent": "#bdbdbd",  # light grey (G0/G1 ambiguous, no pRb)
+    "Cycling_G1":      "#1f77b4",  # = manual G1 (pRb+)
+    "S_phase":         "#2ca02c",  # = manual S
+    "G2_phase":        "#ff7f0e",  # = manual G2
+    "M_phase":         "#d62728",  # = manual M
+    "Unclassified":    "#aaaaaa",
 }
 
 
@@ -293,30 +286,19 @@ def assign_cell_cycle_phase(
     marker_df: pd.DataFrame,
     marker_map: dict[str, str],
     thresholds: dict[str, float],
-    ambiguous_ki67_prb: bool = True,
 ) -> pd.DataFrame:
     """Assign cells to mutually exclusive cell-cycle phases.
 
     Required roles: ``IdU``, ``pH3``, ``CyclinB1``.
-    Optional roles: ``Ki67``, ``pRb``.
+    Optional role: ``pRb``.
 
     Gating hierarchy (order matters):
-      1. IdU+              → S_phase
-      2. pH3+              → M_phase
-      3. CyclinB1+         → G2_phase
-      For remaining cells, G1/G0 classification depends on available markers:
-      - Both Ki67 and pRb present:
-          Ki67+ & pRb+     → Cycling_G1
-          Ki67+ & pRb-     → Early_G1_or_ambiguous  (when ambiguous_ki67_prb=True)
-          Ki67-            → G0_or_quiescent
-      - Ki67 only (no pRb):
-          Ki67+            → Cycling_G1
-          Ki67-            → G0_or_quiescent
-      - pRb only (no Ki67):
-          pRb+             → Cycling_G1
-          pRb-             → G0_or_quiescent
-      - Neither Ki67 nor pRb:
-          all remaining    → G1_or_quiescent  (cannot distinguish)
+      1. IdU+    → S_phase
+      2. pH3+    → M_phase
+      3. CyclinB1+ → G2_phase
+      For remaining cells:
+        pRb present: pRb+ → Cycling_G1, pRb- → G0_or_quiescent
+        pRb absent:  all  → G1_or_quiescent (cannot distinguish)
 
     Returns:
         Copy of marker_df extended with ``cell_cycle_gate_*_pos`` boolean
@@ -330,13 +312,11 @@ def assign_cell_cycle_phase(
         vals = pd.to_numeric(marker_df[col], errors="coerce").fillna(0).values
         return vals > thresholds[role]
 
-    has_ki67 = "Ki67" in marker_map
     has_prb = "pRb" in marker_map
 
     idu_pos = _pos("IdU")
     ph3_pos = _pos("pH3")
     cycb_pos = _pos("CyclinB1")
-    ki67_pos = _pos("Ki67") if has_ki67 else None
     prb_pos = _pos("pRb") if has_prb else None
 
     phases[idu_pos] = "S_phase"
@@ -349,34 +329,17 @@ def assign_cell_cycle_phase(
 
     remaining = phases == "Unclassified"
 
-    if has_ki67 and has_prb:
-        phases[remaining & ki67_pos & prb_pos] = "Cycling_G1"
-        if ambiguous_ki67_prb:
-            remaining = phases == "Unclassified"
-            phases[remaining & ki67_pos & ~prb_pos] = "Early_G1_or_ambiguous"
-        remaining = phases == "Unclassified"
-        phases[remaining & ~ki67_pos] = "G0_or_quiescent"
-
-    elif has_ki67:
-        phases[remaining & ki67_pos] = "Cycling_G1"
-        remaining = phases == "Unclassified"
-        phases[remaining & ~ki67_pos] = "G0_or_quiescent"
-
-    elif has_prb:
+    if has_prb:
         phases[remaining & prb_pos] = "Cycling_G1"
         remaining = phases == "Unclassified"
         phases[remaining & ~prb_pos] = "G0_or_quiescent"
-
     else:
-        # No Ki67 or pRb — cannot distinguish G1 from G0
         phases[remaining] = "G1_or_quiescent"
 
     out = marker_df.copy()
     out["cell_cycle_gate_IdU_pos"] = idu_pos
     out["cell_cycle_gate_pH3_pos"] = ph3_pos
     out["cell_cycle_gate_CyclinB1_pos"] = cycb_pos
-    if has_ki67:
-        out["cell_cycle_gate_Ki67_pos"] = ki67_pos
     if has_prb:
         out["cell_cycle_gate_pRb_pos"] = prb_pos
     out["cell_cycle_phase"] = phases
@@ -568,7 +531,6 @@ def gate_cell_cycle(
     threshold_methods: dict[str, str] | None = None,
     apply_arcsinh: bool = False,
     cofactor: float = 5.0,
-    ambiguous_ki67_prb: bool = True,
     return_adata: bool = True,
 ) -> dict[str, Any]:
     """Full cell-cycle gating workflow for a DataFrame or AnnData.
@@ -577,7 +539,8 @@ def gate_cell_cycle(
         data: pandas DataFrame or AnnData. When AnnData, results are written
             to ``adata.obs`` and ``adata.uns`` if ``return_adata=True``.
         marker_map: Dict mapping role → actual column/var name.
-            Required roles: ``IdU``, ``pH3``, ``CyclinB1``, ``Ki67``, ``pRb``.
+            Required roles: ``IdU``, ``pH3``, ``CyclinB1``.
+            Optional role: ``pRb``.
         layer: AnnData layer key. ``None`` uses ``adata.X`` (recommended:
             use arcsinh-transformed data, not z-scored).
         thresholds: User-supplied thresholds by role. Missing roles fall back
@@ -586,8 +549,6 @@ def gate_cell_cycle(
         apply_arcsinh: Apply arcsinh transform before gating (use only when
             data contains raw CyTOF intensities, not already-transformed values).
         cofactor: Arcsinh cofactor (default 5.0).
-        ambiguous_ki67_prb: Split Ki67+/pRb- cells into
-            ``Early_G1_or_ambiguous`` rather than leaving as ``Unclassified``.
         return_adata: Write results back to ``adata.obs`` / ``adata.uns`` when
             input is AnnData.
 
@@ -620,9 +581,7 @@ def gate_cell_cycle(
         threshold_methods=threshold_methods,
     )
 
-    gated_df = assign_cell_cycle_phase(
-        marker_df, marker_map, resolved, ambiguous_ki67_prb=ambiguous_ki67_prb
-    )
+    gated_df = assign_cell_cycle_phase(marker_df, marker_map, resolved)
     summary = summarize_cell_cycle(gated_df)
 
     result: dict[str, Any] = {
@@ -657,7 +616,6 @@ def gate_cell_cycle_by_group(
     threshold_methods: dict[str, str] | None = None,
     apply_arcsinh: bool = False,
     cofactor: float = 5.0,
-    ambiguous_ki67_prb: bool = True,
 ) -> dict[str, Any]:
     """Cell-cycle gating with independent threshold calculation per group.
 
@@ -697,7 +655,7 @@ def gate_cell_cycle_by_group(
             thresholds=thresholds, quantile_thresholds=quantile_thresholds,
             threshold_methods=threshold_methods,
             apply_arcsinh=apply_arcsinh, cofactor=cofactor,
-            ambiguous_ki67_prb=ambiguous_ki67_prb, return_adata=False,
+            return_adata=False,
         )
         grp_df = res["gated_df"].copy()
         grp_df[groupby] = str(grp)

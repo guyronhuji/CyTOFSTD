@@ -23,7 +23,6 @@ from cytofstandard.cell_cycle import (  # noqa: E402
     PHASE_COLORS,
     PHASE_ORDER,
     REQUIRED_ROLES,
-    OPTIONAL_ROLES,
     auto_detect_cell_cycle_markers,
     assign_cell_cycle_phase,
     calculate_thresholds,
@@ -37,7 +36,7 @@ st.set_page_config(page_title="Cell Cycle | CyTOF Standard", layout="wide")
 render_sidebar()
 page_header(
     "Cell-Cycle Gating",
-    subtitle="Assign cells to G0/G1/S/G2/M phases using IdU, pH3, CyclinB1, Ki67, and pRb",
+    subtitle="Assign cells to G0/G1/S/G2/M phases using IdU, pH3, CyclinB1, and pRb",
     icon="🔄",
 )
 
@@ -88,10 +87,10 @@ detection_status: dict[str, bool] = {}
 
 st.caption(
     "**Required:** IdU, pH3, CyclinB1 — needed for S/M/G2 assignment.  "
-    "**Optional:** Ki67, pRb — used to distinguish Cycling G1 from G0/quiescent."
+    "**Optional:** pRb — distinguishes Cycling G1 from G0/quiescent."
 )
-cols_detect = st.columns(5)
-for i, role in enumerate(["IdU", "pH3", "CyclinB1", "Ki67", "pRb"]):
+cols_detect = st.columns(4)
+for i, role in enumerate(["IdU", "pH3", "CyclinB1", "pRb"]):
     is_required = role in REQUIRED_ROLES
     default_val = detected.get(role, "")
     default_idx = (
@@ -109,7 +108,7 @@ for i, role in enumerate(["IdU", "pH3", "CyclinB1", "Ki67", "pRb"]):
             options,
             index=raw_idx,
             key=f"cc_marker_{role}",
-            help=f"Aliases: {', '.join(CELL_CYCLE_MARKER_ALIASES[role][:3])}…",
+            help=f"Aliases: {', '.join(CELL_CYCLE_MARKER_ALIASES.get(role, [role])[:3])}…",
         )
         if chosen != "— not mapped —":
             marker_map[role] = chosen
@@ -127,21 +126,9 @@ if missing_required:
     st.stop()
 
 mapped_str = "  ·  ".join(f"**{role}** → `{col}`" for role, col in marker_map.items())
-missing_optional = [r for r in OPTIONAL_ROLES if r not in marker_map]
+missing_optional = [r for r in ["pRb"] if r not in marker_map]
 opt_note = f"  (omitted optional: {', '.join(missing_optional)})" if missing_optional else ""
 st.caption(f"Mapped: {mapped_str}{opt_note}")
-
-# ── Options ────────────────────────────────────────────────────────────────────
-
-with st.expander("Gating options", expanded=False):
-    ambiguous_ki67_prb = st.checkbox(
-        "Split Ki67+ / pRb− cells into Early_G1_or_ambiguous",
-        value=True,
-        help=(
-            "When enabled, Ki67-positive cells that are pRb-negative are assigned "
-            "Early_G1_or_ambiguous instead of Unclassified."
-        ),
-    )
 
 st.divider()
 
@@ -158,7 +145,7 @@ with tab_auto:
     st.markdown(
         "**Otsu** (default for IdU / pH3 / CyclinB1) finds the valley between the "
         "negative and S/M/G2 populations — ideal for bimodal CyTOF distributions.  \n"
-        "**Quantile** (default for Ki67 / pRb) uses a fixed percentile."
+        "**Quantile** (default for pRb) uses a fixed percentile."
     )
 
     active_roles = list(marker_map.keys())
@@ -227,7 +214,7 @@ with tab_auto:
             for role, col in marker_map.items()
         ]
     )
-    st.dataframe(thr_preview_df, use_container_width=True, hide_index=True)
+    st.dataframe(thr_preview_df, width="stretch", hide_index=True)
 
     # Quick histograms row ─────────────────────────────────────────────────────
     with st.expander("Marker histograms with thresholds", expanded=True):
@@ -254,7 +241,7 @@ with tab_auto:
             fig.tight_layout()
 
             with fig_cols[idx]:
-                st.pyplot(fig, use_container_width=True)
+                st.pyplot(fig, width="stretch")
             plt.close(fig)
 
     # Apply gating ─────────────────────────────────────────────────────────────
@@ -266,7 +253,6 @@ with tab_auto:
                     layer=layer_arg,
                     quantile_thresholds=quant_inputs,
                     threshold_methods=method_inputs,
-                    ambiguous_ki67_prb=ambiguous_ki67_prb,
                     inplace=True,
                 )
                 bump_adata_version()
@@ -293,11 +279,11 @@ with tab_auto:
             )
 
         fig = plot_cell_cycle_phase_fractions(summary)
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
         plt.close(fig)
 
         st.dataframe(summary.style.format({"fraction": "{:.3f}"}),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
 
         csv_bytes = summary.to_csv(index=False).encode()
         st.download_button(
@@ -357,9 +343,8 @@ with tab_slider:
         y_role: str,
         x_thr: float | None,
         y_thr: float | None,
-        ref_thr: dict | None = None,  # dashed grey reference lines from other gates
     ) -> None:
-        """Draw a coloured phase scatter with threshold lines."""
+        """Draw a coloured phase scatter with threshold lines. y_role is always IdU."""
         x_col = marker_map[x_role]
         y_col = marker_map[y_role]
         for phase in PHASE_ORDER:
@@ -375,26 +360,23 @@ with tab_slider:
                 rasterized=True,
             )
         if x_thr is not None:
-            ax.axvline(x_thr, color="black", lw=1.6, ls="--", alpha=0.85)
+            ax.axvline(x_thr, color="#ff7f0e", lw=1.6, ls="--", alpha=0.9)
         if y_thr is not None:
-            ax.axhline(y_thr, color="black", lw=1.6, ls="--", alpha=0.85)
-        if ref_thr:
-            for rv, rv_thr in ref_thr.items():
-                if rv_thr is not None:
-                    ax.axvline(rv_thr, color="#888", lw=1.0, ls=":", alpha=0.5)
+            ax.axhline(y_thr, color="#d62728", lw=1.6, ls="--", alpha=0.9)
         ax.set_xlabel(x_col, fontsize=9)
         ax.set_ylabel(y_col, fontsize=9)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    # ── Gate 1: CyclinB1 vs IdU  ──────────────────────────────────────────────
-    # Defines S-phase (right of IdU line) and G2-phase (above CyclinB1 line)
+    slider_thr_2d: dict[str, float] = {}
+
+    # ── Gate 1: IdU (Y) vs CyclinB1 (X)  ────────────────────────────────────
+    # Defines S-phase (IdU+) and G2-phase (CyclinB1+ & IdU-)
     gate1_roles = [r for r in ["IdU", "CyclinB1"] if r in marker_map]
 
     if gate1_roles:
-        st.markdown("#### Gate 1 — S-phase & G2-phase: CyclinB1 vs IdU")
+        st.markdown("#### Gate 1 — S-phase & G2-phase: IdU vs CyclinB1")
         col_ctrl, col_plot = st.columns([1, 3])
-        slider_thr_2d: dict[str, float] = {}
 
         with col_ctrl:
             if "IdU" in marker_map:
@@ -412,7 +394,6 @@ with tab_slider:
                     "CyclinB1 threshold", lo, hi, v0, step=step, format="%.3f", key="cc2d_cycb"
                 )
 
-            # Show fraction positive for each
             for role in gate1_roles:
                 col_name = marker_map[role]
                 n_pos = int((mdf_all_2d[col_name].values > slider_thr_2d[role]).sum())
@@ -420,35 +401,32 @@ with tab_slider:
                 st.caption(f"{role}+: **{pct:.1f}%** ({n_pos:,} cells)")
 
         cur_thr_1 = {**init_thr_2d, **slider_thr_2d}
-        # Use a single 'pH3' role as x-axis fallback when CyclinB1 missing
-        x_r = "IdU" if "IdU" in marker_map else gate1_roles[0]
-        y_r = "CyclinB1" if "CyclinB1" in marker_map else gate1_roles[-1]
-        gated_g1 = assign_cell_cycle_phase(mdf_disp_2d, marker_map, cur_thr_1, ambiguous_ki67_prb)
+        gated_g1 = assign_cell_cycle_phase(mdf_disp_2d, marker_map, cur_thr_1)
 
         with col_plot:
             fig, ax = plt.subplots(figsize=(6, 4.5))
             _scatter_gate(
                 ax, mdf_disp_2d, gated_g1,
-                x_role=x_r, y_role=y_r,
-                x_thr=slider_thr_2d.get("IdU"),
-                y_thr=slider_thr_2d.get("CyclinB1"),
+                x_role="CyclinB1", y_role="IdU",
+                x_thr=slider_thr_2d.get("CyclinB1"),
+                y_thr=slider_thr_2d.get("IdU"),
             )
-            ax.set_title("CyclinB1 vs IdU  (S: right | G2: top-left)", fontsize=9)
+            ax.set_title("S / G1 / G2 gate", fontsize=9, fontweight="bold")
             ax.legend(markerscale=3, fontsize=7, loc="upper left",
                       framealpha=0.7, borderpad=0.5)
             fig.tight_layout()
-            st.pyplot(fig, use_container_width=True)
+            st.pyplot(fig, width="stretch")
             plt.close(fig)
 
         st.divider()
+
     else:
-        slider_thr_2d = {}
         cur_thr_1 = init_thr_2d.copy()
 
-    # ── Gate 2: pH3 vs CyclinB1  ──────────────────────────────────────────────
-    # Defines M-phase (above pH3 line); CyclinB1 on X provides context
+    # ── Gate 2: IdU (Y) vs pH3 (X)  ─────────────────────────────────────────
+    # Defines M-phase (pH3+); IdU threshold from Gate 1 shown as reference
     if "pH3" in marker_map:
-        st.markdown("#### Gate 2 — M-phase: pH3 vs CyclinB1")
+        st.markdown("#### Gate 2 — M-phase: IdU vs pH3")
         col_ctrl2, col_plot2 = st.columns([1, 3])
 
         with col_ctrl2:
@@ -462,111 +440,64 @@ with tab_slider:
             st.caption(f"pH3+: **{100*n_pos/len(mdf_all_2d):.1f}%** ({n_pos:,} cells)")
 
         cur_thr_2 = {**init_thr_2d, **slider_thr_2d}
-        x_role2 = "CyclinB1" if "CyclinB1" in marker_map else ("IdU" if "IdU" in marker_map else None)
-        gated_g2 = assign_cell_cycle_phase(mdf_disp_2d, marker_map, cur_thr_2, ambiguous_ki67_prb)
+        gated_g2 = assign_cell_cycle_phase(mdf_disp_2d, marker_map, cur_thr_2)
 
         with col_plot2:
-            if x_role2:
-                fig, ax = plt.subplots(figsize=(6, 4.5))
-                # Draw reference line for the CyclinB1 gate if it was set
-                ref = {x_role2: slider_thr_2d.get(x_role2)} if x_role2 in slider_thr_2d else None
-                _scatter_gate(
-                    ax, mdf_disp_2d, gated_g2,
-                    x_role=x_role2, y_role="pH3",
-                    x_thr=None,  # reference only (dotted)
-                    y_thr=slider_thr_2d["pH3"],
-                    ref_thr=ref,
-                )
-                ax.set_title("pH3 vs CyclinB1  (M-phase: above line)", fontsize=9)
-                ax.legend(markerscale=3, fontsize=7, loc="upper left",
-                          framealpha=0.7, borderpad=0.5)
-                fig.tight_layout()
-                st.pyplot(fig, use_container_width=True)
-                plt.close(fig)
-            else:
-                st.info("CyclinB1 and IdU not mapped — cannot render X-axis context.")
+            fig, ax = plt.subplots(figsize=(6, 4.5))
+            _scatter_gate(
+                ax, mdf_disp_2d, gated_g2,
+                x_role="pH3", y_role="IdU",
+                x_thr=slider_thr_2d["pH3"],
+                y_thr=slider_thr_2d.get("IdU"),
+            )
+            ax.set_title("M gate (pH3)", fontsize=9, fontweight="bold")
+            ax.legend(markerscale=3, fontsize=7, loc="upper left",
+                      framealpha=0.7, borderpad=0.5)
+            fig.tight_layout()
+            st.pyplot(fig, width="stretch")
+            plt.close(fig)
 
         st.divider()
 
-    # ── Gate 3: Ki67 vs pRb  ──────────────────────────────────────────────────
-    # Defines Cycling_G1 (top-right) vs G0/quiescent (bottom-left)
-    g3_roles = [r for r in ["Ki67", "pRb"] if r in marker_map]
-
-    if g3_roles:
-        x_role3 = "pRb" if "pRb" in marker_map else None
-        y_role3 = "Ki67" if "Ki67" in marker_map else None
-        title_g3 = " vs ".join(
-            ([y_role3] if y_role3 else []) + ([x_role3] if x_role3 else [])
-        )
-        st.markdown(f"#### Gate 3 — G1 vs G0: {title_g3}")
+    # ── Gate 3: IdU (Y) vs pRb (X)  ─────────────────────────────────────────
+    # Defines Cycling G1 (pRb+) vs G0/quiescent (pRb-)
+    if "pRb" in marker_map:
+        st.markdown("#### Gate 3 — G0 vs Cycling G1: IdU vs pRb")
         col_ctrl3, col_plot3 = st.columns([1, 3])
 
         with col_ctrl3:
-            if "Ki67" in marker_map:
-                lo, hi = _slider_range("Ki67")
-                step = max(0.001, (hi - lo) / 500)
-                v0 = float(np.clip(init_thr_2d.get("Ki67", (lo + hi) / 2), lo, hi))
-                slider_thr_2d["Ki67"] = st.slider(
-                    "Ki67 threshold", lo, hi, v0, step=step, format="%.3f", key="cc2d_ki67"
-                )
-                n_pos = int((mdf_all_2d[marker_map["Ki67"]].values > slider_thr_2d["Ki67"]).sum())
-                st.caption(f"Ki67+: **{100*n_pos/len(mdf_all_2d):.1f}%** ({n_pos:,} cells)")
-
-            if "pRb" in marker_map:
-                lo, hi = _slider_range("pRb")
-                step = max(0.001, (hi - lo) / 500)
-                v0 = float(np.clip(init_thr_2d.get("pRb", (lo + hi) / 2), lo, hi))
-                slider_thr_2d["pRb"] = st.slider(
-                    "pRb threshold", lo, hi, v0, step=step, format="%.3f", key="cc2d_prb"
-                )
-                n_pos = int((mdf_all_2d[marker_map["pRb"]].values > slider_thr_2d["pRb"]).sum())
-                st.caption(f"pRb+: **{100*n_pos/len(mdf_all_2d):.1f}%** ({n_pos:,} cells)")
+            lo, hi = _slider_range("pRb")
+            step = max(0.001, (hi - lo) / 500)
+            v0 = float(np.clip(init_thr_2d.get("pRb", (lo + hi) / 2), lo, hi))
+            slider_thr_2d["pRb"] = st.slider(
+                "pRb threshold", lo, hi, v0, step=step, format="%.3f", key="cc2d_prb"
+            )
+            n_pos = int((mdf_all_2d[marker_map["pRb"]].values > slider_thr_2d["pRb"]).sum())
+            st.caption(f"pRb+: **{100*n_pos/len(mdf_all_2d):.1f}%** ({n_pos:,} cells)")
 
         cur_thr_3 = {**init_thr_2d, **slider_thr_2d}
-        gated_g3 = assign_cell_cycle_phase(mdf_disp_2d, marker_map, cur_thr_3, ambiguous_ki67_prb)
+        gated_g3 = assign_cell_cycle_phase(mdf_disp_2d, marker_map, cur_thr_3)
 
         with col_plot3:
-            if x_role3 and y_role3:
-                fig, ax = plt.subplots(figsize=(6, 4.5))
-                _scatter_gate(
-                    ax, mdf_disp_2d, gated_g3,
-                    x_role=x_role3, y_role=y_role3,
-                    x_thr=slider_thr_2d.get("pRb"),
-                    y_thr=slider_thr_2d.get("Ki67"),
-                )
-                ax.set_title("Ki67 vs pRb  (Cycling G1: top-right | G0: bottom-left)", fontsize=9)
-                ax.legend(markerscale=3, fontsize=7, loc="upper left",
-                          framealpha=0.7, borderpad=0.5)
-                fig.tight_layout()
-                st.pyplot(fig, use_container_width=True)
-                plt.close(fig)
-            elif y_role3:  # Ki67 only — 1-D histogram style scatter
-                fig, ax = plt.subplots(figsize=(6, 4.5))
-                for phase in PHASE_ORDER:
-                    mask = (gated_g3["cell_cycle_phase"] == phase).values
-                    if mask.any():
-                        y_vals = mdf_disp_2d.loc[mask, marker_map["Ki67"]].values
-                        ax.scatter(
-                            np.random.uniform(0, 1, mask.sum()), y_vals,
-                            c=PHASE_COLORS.get(phase, "#aaaaaa"),
-                            s=4, alpha=0.5, linewidths=0, rasterized=True,
-                            label=f"{phase.replace('_', ' ')} ({mask.sum():,})",
-                        )
-                ax.axhline(slider_thr_2d["Ki67"], color="black", lw=1.6, ls="--")
-                ax.set_xlabel("(jitter)", fontsize=9)
-                ax.set_ylabel(marker_map["Ki67"], fontsize=9)
-                ax.legend(markerscale=3, fontsize=7)
-                fig.tight_layout()
-                st.pyplot(fig, use_container_width=True)
-                plt.close(fig)
+            fig, ax = plt.subplots(figsize=(6, 4.5))
+            _scatter_gate(
+                ax, mdf_disp_2d, gated_g3,
+                x_role="pRb", y_role="IdU",
+                x_thr=slider_thr_2d.get("pRb"),
+                y_thr=slider_thr_2d.get("IdU"),
+            )
+            ax.set_title("G0 gate (pRb)", fontsize=9, fontweight="bold")
+            ax.legend(markerscale=3, fontsize=7, loc="upper left",
+                      framealpha=0.7, borderpad=0.5)
+            fig.tight_layout()
+            st.pyplot(fig, width="stretch")
+            plt.close(fig)
 
         st.divider()
 
     # ── Live summary ───────────────────────────────────────────────────────────
     final_thr_2d = {**init_thr_2d, **slider_thr_2d}
-    gated_final_2d = assign_cell_cycle_phase(
-        mdf_disp_2d, marker_map, final_thr_2d, ambiguous_ki67_prb
-    )
+    gated_final_2d = assign_cell_cycle_phase(mdf_disp_2d, marker_map, final_thr_2d)
     summary_2d = summarize_cell_cycle(gated_final_2d)
 
     st.markdown("#### Live preview")
@@ -583,7 +514,7 @@ with tab_slider:
         )
 
     fig_sum2d = plot_cell_cycle_phase_fractions(summary_2d, figsize=(7, 3))
-    st.pyplot(fig_sum2d, use_container_width=True)
+    st.pyplot(fig_sum2d, width="stretch")
     plt.close(fig_sum2d)
 
     # ── Apply gating to full dataset ───────────────────────────────────────────
@@ -594,7 +525,6 @@ with tab_slider:
                     marker_map=marker_map,
                     layer=layer_arg,
                     thresholds=final_thr_2d,
-                    ambiguous_ki67_prb=ambiguous_ki67_prb,
                     inplace=True,
                 )
                 bump_adata_version()
@@ -611,7 +541,7 @@ with tab_slider:
         sum2d = res2d["summary"]
         st.subheader("Saved results (all cells)")
         st.dataframe(sum2d.style.format({"fraction": "{:.3f}"}),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
         st.download_button(
             "Download summary CSV",
             sum2d.to_csv(index=False).encode(),
