@@ -19,6 +19,7 @@ from _shared import bump_adata_version, get_run, page_header, render_sidebar  # 
 from cytofstandard.cell_cycle import (  # noqa: E402
     CELL_CYCLE_MARKER_ALIASES,
     DEFAULT_QUANTILE_THRESHOLDS,
+    DEFAULT_THRESHOLD_METHODS,
     PHASE_COLORS,
     PHASE_ORDER,
     REQUIRED_ROLES,
@@ -146,7 +147,7 @@ st.divider()
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_auto, tab_slider = st.tabs(["Auto (quantile thresholds)", "Interactive sliders"])
+tab_auto, tab_slider = st.tabs(["Auto thresholds", "Interactive sliders"])
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -155,26 +156,45 @@ tab_auto, tab_slider = st.tabs(["Auto (quantile thresholds)", "Interactive slide
 
 with tab_auto:
     st.markdown(
-        "Thresholds are set automatically using quantiles of each marker's distribution. "
-        "Adjust the quantile per marker if needed."
+        "**Otsu** (default for IdU / pH3 / CyclinB1) finds the valley between the "
+        "negative and S/M/G2 populations — ideal for bimodal CyTOF distributions.  \n"
+        "**Quantile** (default for Ki67 / pRb) uses a fixed percentile."
     )
 
-    col_q1, col_q2 = st.columns(2)
-    quant_inputs: dict[str, float] = {}
     active_roles = list(marker_map.keys())
+    method_inputs: dict[str, str] = {}
+    quant_inputs: dict[str, float] = {}
+
+    cols_method = st.columns(len(active_roles))
     for idx, role in enumerate(active_roles):
-        default_q = DEFAULT_QUANTILE_THRESHOLDS.get(role, 0.90)
-        col = col_q1 if idx % 2 == 0 else col_q2
-        with col:
-            quant_inputs[role] = st.slider(
-                f"{role} quantile",
-                min_value=0.50,
-                max_value=0.999,
-                value=default_q,
-                step=0.005,
-                format="%.3f",
-                key=f"cc_auto_q_{role}",
+        default_method = DEFAULT_THRESHOLD_METHODS.get(role, "quantile")
+        with cols_method[idx]:
+            method_inputs[role] = st.radio(
+                f"{role} method",
+                ["otsu", "quantile"],
+                index=0 if default_method == "otsu" else 1,
+                key=f"cc_method_{role}",
+                horizontal=False,
             )
+
+    # Show quantile slider only for roles using quantile method
+    quantile_roles = [r for r in active_roles if method_inputs[r] == "quantile"]
+    if quantile_roles:
+        st.caption("Quantile settings (applies only to roles using the quantile method):")
+        col_q1, col_q2 = st.columns(2)
+        for idx, role in enumerate(quantile_roles):
+            default_q = DEFAULT_QUANTILE_THRESHOLDS.get(role, 0.90)
+            col = col_q1 if idx % 2 == 0 else col_q2
+            with col:
+                quant_inputs[role] = st.slider(
+                    f"{role} quantile",
+                    min_value=0.50,
+                    max_value=0.999,
+                    value=default_q,
+                    step=0.005,
+                    format="%.3f",
+                    key=f"cc_auto_q_{role}",
+                )
 
     # Compute and display preview thresholds ──────────────────────────────────
     @st.cache_data(show_spinner=False)
@@ -189,7 +209,9 @@ with tab_auto:
         st.stop()
 
     preview_thresholds = calculate_thresholds(
-        mdf, marker_map, quantile_thresholds=quant_inputs
+        mdf, marker_map,
+        quantile_thresholds=quant_inputs,
+        threshold_methods=method_inputs,
     )
 
     # Show threshold table
@@ -197,6 +219,7 @@ with tab_auto:
         [
             {
                 "Role": role,
+                "Method": method_inputs.get(role, "—"),
                 "Column": col,
                 "Threshold": f"{preview_thresholds[role]:.4f}",
                 "% positive": f"{100.0 * (mdf[col].values > preview_thresholds[role]).mean():.1f}%",
@@ -207,16 +230,24 @@ with tab_auto:
     st.dataframe(thr_preview_df, use_container_width=True, hide_index=True)
 
     # Quick histograms row ─────────────────────────────────────────────────────
-    with st.expander("Marker histograms with thresholds", expanded=False):
-        fig_cols = st.columns(5)
+    with st.expander("Marker histograms with thresholds", expanded=True):
+        n_markers = len(marker_map)
+        fig_cols = st.columns(n_markers)
         for idx, (role, col) in enumerate(marker_map.items()):
             vals = pd.to_numeric(mdf[col], errors="coerce").dropna().values
             thr = preview_thresholds[role]
+            n_pos = int((vals > thr).sum())
+            pct = 100.0 * n_pos / len(vals)
 
-            fig, ax = plt.subplots(figsize=(3.5, 2.5))
-            ax.hist(vals, bins=60, color="#4a90d9", alpha=0.75, edgecolor="none")
-            ax.axvline(thr, color="#e05151", linewidth=1.5, linestyle="--")
-            ax.set_title(f"{role}", fontsize=9, fontweight="bold")
+            fig, ax = plt.subplots(figsize=(3.5, 2.8))
+            ax.hist(vals, bins=80, color="#4a90d9", alpha=0.75, edgecolor="none")
+            ax.axvline(thr, color="#e05151", linewidth=1.5, linestyle="--",
+                       label=f"{thr:.3f} ({pct:.1f}%)")
+            ax.legend(fontsize=7, loc="upper right")
+            ax.set_title(
+                f"{role}  [{method_inputs.get(role, '?')}]",
+                fontsize=9, fontweight="bold",
+            )
             ax.set_xlabel(col, fontsize=8)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
@@ -234,6 +265,7 @@ with tab_auto:
                     marker_map=marker_map,
                     layer=layer_arg,
                     quantile_thresholds=quant_inputs,
+                    threshold_methods=method_inputs,
                     ambiguous_ki67_prb=ambiguous_ki67_prb,
                     inplace=True,
                 )

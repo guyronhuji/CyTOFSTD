@@ -28,6 +28,19 @@ CELL_CYCLE_MARKER_ALIASES: dict[str, list[str]] = {
     "pRb": ["pRb", "phospho-Rb", "pRB", "Rb_phospho", "pRb_S807", "Rb_S807", "Rb_pS807"],
 }
 
+# Default auto-threshold strategy per role.
+# Bimodal markers (IdU, pH3, CyclinB1) use Otsu's method to find the valley
+# between negative and positive populations. Continuous markers (Ki67, pRb)
+# use quantile, because their positive fraction varies biologically.
+DEFAULT_THRESHOLD_METHODS: dict[str, str] = {
+    "IdU": "otsu",
+    "pH3": "otsu",
+    "CyclinB1": "otsu",
+    "Ki67": "quantile",
+    "pRb": "quantile",
+}
+
+# Quantile fallbacks used when strategy is "quantile" (or Otsu fails).
 DEFAULT_QUANTILE_THRESHOLDS: dict[str, float] = {
     "IdU": 0.95,
     "pH3": 0.98,
@@ -167,43 +180,107 @@ def extract_marker_dataframe(
 
 # ── Thresholding ───────────────────────────────────────────────────────────────
 
+def _otsu_threshold(values: np.ndarray, n_bins: int = 512) -> float:
+    """Otsu's method: find the threshold that maximises inter-class variance.
+
+    Works well for bimodal distributions (e.g. IdU, pH3, CyclinB1) where a
+    clear valley separates negative and positive populations.
+
+    Returns the threshold value in the original data units.
+    """
+    hist, edges = np.histogram(values, bins=n_bins)
+    hist = hist.astype(np.float64)
+    total = hist.sum()
+    if total == 0:
+        return float(np.median(values))
+    hist /= total
+    centers = (edges[:-1] + edges[1:]) / 2.0
+
+    # Cumulative weight and mean of the lower class
+    w0 = np.cumsum(hist)
+    mu_total = np.sum(hist * centers)
+    mu0 = np.cumsum(hist * centers)
+
+    w1 = 1.0 - w0
+    # Avoid division by zero at the extremes
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mu0_safe = np.where(w0 > 0, mu0 / w0, 0.0)
+        mu1_safe = np.where(w1 > 0, (mu_total - mu0) / w1, 0.0)
+    sigma_b2 = w0 * w1 * (mu0_safe - mu1_safe) ** 2
+
+    # Pick the midpoint of any plateau of maxima
+    max_val = sigma_b2.max()
+    candidates = np.where(sigma_b2 >= max_val * 0.9999)[0]
+    best_idx = int(candidates[len(candidates) // 2])
+    return float(centers[best_idx])
+
+
 def calculate_thresholds(
     marker_df: pd.DataFrame,
     marker_map: dict[str, str],
     thresholds: dict[str, float] | None = None,
     quantile_thresholds: dict[str, float] | None = None,
+    threshold_methods: dict[str, str] | None = None,
 ) -> dict[str, float]:
     """Compute per-marker gating thresholds.
 
-    User-supplied thresholds take precedence; missing roles fall back to
-    quantile-based estimates.
+    User-supplied thresholds (``thresholds`` dict) always take precedence.
+    For automatic estimation, each role has a default strategy:
+
+    - ``"otsu"``     — Otsu's method; optimal for bimodal distributions
+                       (IdU, pH3, CyclinB1). Finds the valley between
+                       negative and positive populations.
+    - ``"quantile"`` — Fixed quantile of the distribution; appropriate for
+                       continuous markers (Ki67, pRb) where the positive
+                       fraction is biologically variable.
 
     Args:
-        marker_df: DataFrame with marker columns (output of
-            :func:`extract_marker_dataframe`).
+        marker_df: DataFrame with marker columns.
         marker_map: Role → column name mapping.
-        thresholds: User-supplied thresholds keyed by role (e.g. ``{"IdU": 1.5}``).
-        quantile_thresholds: Per-role quantile overrides. Defaults to
-            :data:`DEFAULT_QUANTILE_THRESHOLDS`.
+        thresholds: User-supplied thresholds by role. Missing roles use auto.
+        quantile_thresholds: Per-role quantile overrides (used when strategy
+            is ``"quantile"`` or as a fallback if Otsu produces an extreme
+            value). Defaults to :data:`DEFAULT_QUANTILE_THRESHOLDS`.
+        threshold_methods: Per-role strategy override (``"otsu"`` or
+            ``"quantile"``). Defaults to :data:`DEFAULT_THRESHOLD_METHODS`.
 
     Returns:
         Dict mapping role → threshold value (float).
     """
     if quantile_thresholds is None:
         quantile_thresholds = DEFAULT_QUANTILE_THRESHOLDS.copy()
+    if threshold_methods is None:
+        threshold_methods = DEFAULT_THRESHOLD_METHODS.copy()
 
     result: dict[str, float] = {}
     for role, col in marker_map.items():
         if thresholds and role in thresholds and thresholds[role] is not None:
             result[role] = float(thresholds[role])
+            continue
+
+        values = pd.to_numeric(marker_df[col], errors="coerce").dropna().values
+        if len(values) == 0:
+            raise ValueError(
+                f"Marker '{col}' (role: '{role}') has no valid numeric values."
+            )
+
+        method = threshold_methods.get(role, "quantile")
+
+        if method == "otsu":
+            thr = _otsu_threshold(values)
+            # Sanity check: if Otsu returns a value outside the central 10–99 %ile
+            # range it likely failed (all-negative or all-positive panel).
+            # Fall back to quantile in that case.
+            p10 = float(np.percentile(values, 10))
+            p99 = float(np.percentile(values, 99))
+            if thr <= p10 or thr >= p99:
+                q = quantile_thresholds.get(role, 0.90)
+                thr = float(np.quantile(values, q))
         else:
             q = quantile_thresholds.get(role, 0.90)
-            values = pd.to_numeric(marker_df[col], errors="coerce").dropna()
-            if len(values) == 0:
-                raise ValueError(
-                    f"Marker '{col}' (role: '{role}') has no valid numeric values."
-                )
-            result[role] = float(np.quantile(values, q))
+            thr = float(np.quantile(values, q))
+
+        result[role] = thr
 
     return result
 
@@ -486,6 +563,7 @@ def gate_cell_cycle(
     layer: str | None = None,
     thresholds: dict[str, float] | None = None,
     quantile_thresholds: dict[str, float] | None = None,
+    threshold_methods: dict[str, str] | None = None,
     apply_arcsinh: bool = False,
     cofactor: float = 5.0,
     ambiguous_ki67_prb: bool = True,
@@ -537,6 +615,7 @@ def gate_cell_cycle(
         marker_df, marker_map,
         thresholds=thresholds,
         quantile_thresholds=quantile_thresholds,
+        threshold_methods=threshold_methods,
     )
 
     gated_df = assign_cell_cycle_phase(
@@ -573,6 +652,7 @@ def gate_cell_cycle_by_group(
     layer: str | None = None,
     thresholds: dict[str, float] | None = None,
     quantile_thresholds: dict[str, float] | None = None,
+    threshold_methods: dict[str, str] | None = None,
     apply_arcsinh: bool = False,
     cofactor: float = 5.0,
     ambiguous_ki67_prb: bool = True,
@@ -613,6 +693,7 @@ def gate_cell_cycle_by_group(
         res = gate_cell_cycle(
             grp_data, marker_map, layer=layer,
             thresholds=thresholds, quantile_thresholds=quantile_thresholds,
+            threshold_methods=threshold_methods,
             apply_arcsinh=apply_arcsinh, cofactor=cofactor,
             ambiguous_ki67_prb=ambiguous_ki67_prb, return_adata=False,
         )
