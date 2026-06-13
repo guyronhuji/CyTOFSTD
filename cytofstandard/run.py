@@ -5715,6 +5715,127 @@ class Run:
 
         return summary
 
+    def gate_cell_cycle(
+        self,
+        marker_map: dict[str, str] | None = None,
+        layer: str | None = None,
+        thresholds: dict[str, float] | None = None,
+        quantile_thresholds: dict[str, float] | None = None,
+        ambiguous_ki67_prb: bool = True,
+        inplace: bool = True,
+    ) -> dict[str, Any]:
+        """Assign cells to cell-cycle phases using hierarchical marker gating.
+
+        Uses arcsinh-transformed data (``adata.X`` by default, or a named
+        layer). Do **not** pass the ``zscore`` layer — gating thresholds are
+        calibrated for arcsinh-scale values.
+
+        Gating hierarchy (mutually exclusive, applied in order):
+          IdU+              → S_phase
+          pH3+              → M_phase
+          CyclinB1+         → G2_phase
+          Ki67+ & pRb+      → Cycling_G1
+          Ki67+ & pRb-      → Early_G1_or_ambiguous (when ambiguous_ki67_prb=True)
+          Ki67-             → G0_or_quiescent
+          remaining         → Unclassified
+
+        Args:
+            marker_map: Dict mapping role → actual ``var_name`` column.
+                Required roles: ``IdU``, ``pH3``, ``CyclinB1``, ``Ki67``,
+                ``pRb``. If ``None``, auto-detection is attempted from
+                ``adata.var_names`` using known aliases.
+            layer: AnnData layer to read expression from. ``None`` uses
+                ``adata.X`` (typically arcsinh-transformed after ingestion).
+                Avoid ``"zscore"`` — thresholds are not calibrated for it.
+            thresholds: User-supplied thresholds by role. Missing roles use
+                quantile-based defaults.
+            quantile_thresholds: Override the default quantile per role.
+                Defaults: IdU=0.95, pH3=0.98, CyclinB1=0.85, Ki67=0.60,
+                pRb=0.60.
+            ambiguous_ki67_prb: Split Ki67+/pRb- cells into
+                ``Early_G1_or_ambiguous``. Default True.
+            inplace: Persist updated AnnData to disk after gating.
+
+        Returns:
+            Dict with:
+            - ``gated_df``: cell-level DataFrame with gate columns and
+              ``cell_cycle_phase``.
+            - ``summary``: phase counts and fractions.
+            - ``thresholds``: thresholds used (role → value).
+
+        Raises:
+            ValueError: If required markers cannot be found in ``adata.var_names``.
+        """
+        from cytofstandard.cell_cycle import (
+            auto_detect_cell_cycle_markers,
+            REQUIRED_ROLES,
+            gate_cell_cycle as _gate_cc,
+        )
+
+        self.require_ingested()
+        adata = self.read_adata()
+
+        if marker_map is None:
+            detected = auto_detect_cell_cycle_markers(list(adata.var_names))
+            missing_required = [r for r in REQUIRED_ROLES if r not in detected]
+            if missing_required:
+                raise ValueError(
+                    f"Could not auto-detect required cell-cycle markers. "
+                    f"Missing: {missing_required}. "
+                    f"Pass marker_map explicitly, e.g. "
+                    f"marker_map={{'IdU': 'IdU', 'pH3': 'pH3', 'CyclinB1': 'CyclinB1', ...}}"
+                )
+            marker_map = detected
+
+        result = _gate_cc(
+            adata,
+            marker_map=marker_map,
+            layer=layer,
+            thresholds=thresholds,
+            quantile_thresholds=quantile_thresholds,
+            apply_arcsinh=False,
+            ambiguous_ki67_prb=ambiguous_ki67_prb,
+            return_adata=True,
+        )
+
+        adata = result["adata"]
+        self._adata = adata
+
+        if "cell_cycle_gating" not in adata.uns:
+            adata.uns["cell_cycle_gating"] = {}
+        from datetime import datetime as _dt
+        adata.uns["cell_cycle_gating"]["latest"] = {
+            "timestamp": _dt.utcnow().isoformat(),
+            "marker_map": marker_map,
+            "thresholds": result["thresholds"],
+            "layer": layer,
+            "ambiguous_ki67_prb": ambiguous_ki67_prb,
+            "n_cells": int(adata.n_obs),
+        }
+
+        if inplace:
+            self._try_save_inplace(adata)
+
+        self._log_run_event(
+            "cell_cycle_gated",
+            {
+                "marker_map": marker_map,
+                "thresholds": result["thresholds"],
+                "layer": layer,
+                "n_cells": int(adata.n_obs),
+                "phase_counts": {
+                    row["cell_cycle_phase"]: int(row["n_cells"])
+                    for _, row in result["summary"].iterrows()
+                },
+            },
+        )
+
+        return {
+            "gated_df": result["gated_df"],
+            "summary": result["summary"],
+            "thresholds": result["thresholds"],
+        }
+
     def create_subset_run(
         self,
         new_run_id: str,

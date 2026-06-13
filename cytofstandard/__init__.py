@@ -33,4 +33,4 @@ __all__ = [
     "IngestionError",
     "ZarrLockedError",
 ]
-__version__ = "0.1.2"
+__version__ = "0.1.4"
