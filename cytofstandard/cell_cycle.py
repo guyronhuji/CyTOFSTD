@@ -64,14 +64,16 @@ PHASE_ORDER: list[str] = [
 ]
 
 PHASE_COLORS: dict[str, str] = {
-    "G0_or_quiescent": "#4a90d9",
-    "G1_or_quiescent": "#74b7e8",
-    "Cycling_G1": "#7bc67e",
-    "Early_G1_or_ambiguous": "#f5a623",
-    "S_phase": "#e05151",
-    "G2_phase": "#b95dd3",
-    "M_phase": "#e8823a",
-    "Unclassified": "#aaaaaa",
+    # Hues match the notebook manual gating: G0=grey, G1=blue, S=green, G2=orange, M=red.
+    # Sub-phases use a lighter tint of the parent hue.
+    "G0_or_quiescent":      "#9e9e9e",  # = manual G0
+    "G1_or_quiescent":      "#bdbdbd",  # light grey (G0/G1 ambiguous)
+    "Cycling_G1":           "#1f77b4",  # = manual G1
+    "Early_G1_or_ambiguous":"#aec7e8",  # light blue (early/ambiguous G1)
+    "S_phase":              "#2ca02c",  # = manual S
+    "G2_phase":             "#ff7f0e",  # = manual G2
+    "M_phase":              "#d62728",  # = manual M
+    "Unclassified":         "#aaaaaa",
 }
 
 

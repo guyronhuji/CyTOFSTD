@@ -5841,6 +5841,49 @@ class Run:
             "thresholds": result["thresholds"],
         }
 
+    def open_cell_cycle_app(self, port: int = 8502) -> "subprocess.Popen":
+        """Launch the cell-cycle gating Streamlit app pre-loaded with this run.
+
+        Opens http://localhost:<port> in the browser automatically.
+        The app shows Auto-threshold and Interactive-slider tabs — click
+        "Apply Gating" to write the chosen thresholds back to the stored adata.
+
+        Afterwards, call the Section 9 cell in the notebook to pick up the
+        saved thresholds from ``adata.uns["cell_cycle_gating"]["latest"]``.
+
+        Args:
+            port: Local port to serve on (default 8502 to avoid clashing with
+                  the full CyTOF app on 8501).
+
+        Returns:
+            The ``subprocess.Popen`` handle — call ``proc.terminate()`` to stop.
+        """
+        import os as _os
+        import subprocess
+        import sys
+        from pathlib import Path as _Path
+
+        app_script = _Path(__file__).parent.parent / "app" / "cell_cycle_app.py"
+        if not app_script.exists():
+            raise FileNotFoundError(f"cell_cycle_app.py not found at {app_script}")
+
+        env = _os.environ.copy()
+        env["CYTOF_PROJECT_PATH"] = str(self.project.path)
+        env["CYTOF_RUN_ID"]       = self.run_id
+
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "streamlit", "run", str(app_script),
+                "--server.port", str(port),
+                "--server.headless", "false",
+                "--browser.gatherUsageStats", "false",
+            ],
+            env=env,
+        )
+        print(f"Cell-cycle app launched (PID {proc.pid})  →  http://localhost:{port}")
+        print("Call proc.terminate() to stop it.")
+        return proc
+
     def create_subset_run(
         self,
         new_run_id: str,
