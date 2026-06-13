@@ -4,6 +4,11 @@
 
 UUID generation utilities for cytofstandard.
 
+## Public Exports (`__all__`)
+
+- `generate_cell_uuid`
+- `generate_file_uuid`
+
 ## Top-level Functions
 
 ### `generate_cell_uuid(project_id: str, run_id: str, file_hash: str, event_index: int) -> str`

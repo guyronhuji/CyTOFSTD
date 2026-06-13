@@ -19,6 +19,7 @@ CyTOF Standard package - Phase 1: Ingestion and storage.
 - `MetadataValidationError`
 - `MarkerValidationError`
 - `IngestionError`
+- `ZarrLockedError`
 
 ## Top-level Functions
 

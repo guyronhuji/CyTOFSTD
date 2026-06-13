@@ -4,6 +4,10 @@
 
 Marker registry for standardizing marker names.
 
+## Public Exports (`__all__`)
+
+- `MarkerRegistry`
+
 ## Top-level Functions
 
 No public top-level functions.

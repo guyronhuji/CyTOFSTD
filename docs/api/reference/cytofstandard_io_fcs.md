@@ -4,6 +4,10 @@
 
 FCS file reader for cytofstandard.
 
+## Public Exports (`__all__`)
+
+- `read_fcs`
+
 ## Top-level Functions
 
 ### `read_fcs(file_path: str, channel_naming: str = '$PnS') -> Tuple[pd.DataFrame, pd.DataFrame]`

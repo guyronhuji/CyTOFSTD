@@ -4,6 +4,10 @@
 
 Parquet file reader for cytofstandard.
 
+## Public Exports (`__all__`)
+
+- `read_parquet`
+
 ## Top-level Functions
 
 ### `read_parquet(file_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]`

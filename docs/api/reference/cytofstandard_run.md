@@ -20,6 +20,50 @@ CytOF run for managing ingestion and data access.
 
 #### Methods
 
+##### `add_cell_cycle_pseudotime(self, marker_cols: dict[str, str] | None = None, phase_col: str = 'cell_cycle_phase', output_col: str = 'cell_cycle_pseudotime', angle_col: str = 'cell_cycle_angle', phase_order: list[str] | None = None, phase_widths: dict[str, float] | None = None, overwrite: bool = False, inplace: bool = True) -> 'anndata.AnnData'`
+
+Add a continuous cell-cycle pseudotime coordinate to this run.
+
+Requires that :meth:`gate_cell_cycle` has already been run so that
+``adata.obs["cell_cycle_phase"]`` exists.
+
+Within each phase, ordering is based on marker intensity ranks:
+
+* **G0/G1 phases** — ``pRb`` (increases as CDK4/6 phosphorylate Rb)
+* **S phase** — ``DNA`` (content increases through replication)
+* **G2 phase** — ``CyclinB1`` (accumulates before M entry)
+* **M phase** — ``pH3`` (peaks during mitosis)
+
+Args:
+    marker_cols: Dict mapping role → actual column name, e.g.
+        ``{"pRb": "pRb", "DNA": "DNA", "CyclinB1": "CyclinB1",
+        "pH3": "pH3", "IdU": "IdU"}``.
+        If ``None``, the gating marker map stored in
+        ``adata.uns["cell_cycle_gating"]`` is used for the gating
+        markers (IdU/pH3/CyclinB1/pRb); **DNA must still be added
+        manually** if it is needed for within-S ordering.
+    phase_col: Column in ``adata.obs`` with categorical phase labels.
+    output_col: Output column name for pseudotime.
+    angle_col: Output column name for the 2π angle.
+    phase_order: Custom biological ordering of phase labels.
+    phase_widths: Dict of phase → fractional arc width (summed to 1).
+    overwrite: Overwrite existing pseudotime columns. Default False.
+    inplace: Persist updated AnnData to disk. Default True.
+
+Returns:
+    Updated AnnData object (with pseudotime columns in ``obs``).
+
+Example::
+
+    run.add_cell_cycle_pseudotime(
+        marker_cols={
+            "pRb": "pRb", "IdU": "IdU",
+            "CyclinB1": "CyclinB1", "pH3": "pH3",
+            "DNA": "DNA",
+        },
+        overwrite=True,
+    )
+
 ##### `annotate_clusters(self, cluster_key: str, annotation_map: dict[str, str], output_key: str | None = None, inplace: bool = True) -> pd.Series`
 
 Map cluster labels to named cell types.
@@ -42,6 +86,50 @@ Returns:
 
 Raises:
     ValueError: If ``cluster_key`` is not in ``adata.obs``.
+
+##### `bootstrap_rmt_spectrum(self, markers = None, layer = None, groupby = None, matrix = 'marker_cov', standardize = True, n_cells = 10000, frac = 0.8, n_bootstrap = 200, random_state = 0, uns_key = 'rmt_bootstrap', plot = False, inplace = True)`
+
+Bootstrap stability of the RMT eigenvalue spectrum.
+
+Repeatedly subsamples a fraction of cells and recomputes the
+eigenvalue spectrum to quantify estimation uncertainty.
+
+- **Eigenvalue distributions**: spread of each rank's eigenvalue
+  across resamples — tight = well-estimated, wide = noisy.
+- **Eigenvector stability** (``matrix="marker_cov"`` only): mean
+  absolute cosine similarity between the reference eigenvector and
+  each bootstrap replicate.  Near 1 = reproducible; near 0 = unstable.
+
+These complement the MP boundary from :meth:`compute_rmt_spectrum`:
+RMT says "above the noise floor"; bootstrap says "stably estimated".
+
+Args:
+    markers: Subset of marker names to use.  ``None`` uses all.
+    layer: AnnData layer to use.  ``None`` uses ``adata.X``.
+    groupby: ``adata.obs`` column to group by.
+    matrix: ``"marker_cov"`` or ``"cell_gram"``.
+    standardize: Centre and scale each marker before analysis.
+    n_cells: Maximum cell pool size per group before bootstrapping.
+    frac: Fraction of the pool drawn without replacement per replicate.
+    n_bootstrap: Number of bootstrap resamples.
+    random_state: Seed for the RNG.
+    uns_key: Key under which results are stored in ``adata.uns``.
+    plot: If ``True``, return ``(result, fig)`` with a two-panel
+        figure: eigenvalue distributions and eigenvector stability.
+    inplace: If ``True``, persist the updated AnnData to disk.
+
+Returns:
+    Result dict (or ``(dict, Figure)`` when ``plot=True``).  Contains
+    ``eigenvalue_ref``, ``eigenvalue_matrix`` (n_bootstrap x p),
+    ``eigenvalue_mean``, ``eigenvalue_std``, ``eigenvalue_ci_low``,
+    ``eigenvalue_ci_high``, ``eigenvector_stability`` (marker_cov
+    only), ``lambda_max_mp_ref``, ``lambda_max_mp_distribution``,
+    ``n_signal_ref``, ``markers``, ``matrix``.
+    With ``groupby``, nested under ``"groups"``.
+
+Raises:
+    ValueError: Invalid parameter values or missing data.
+    RunNotIngestedError: Run has not been ingested.
 
 ##### `cluster_leiden(self, embedding_name: str, cluster_key: str | None = None, resolution: float = 1.0, n_iterations: int = 2, beta: float = 0.01, objective_function: str = 'modularity', seed: int = 42, verbose: bool = False, inplace: bool = True) -> dict[str, Any]`
 
@@ -106,6 +194,83 @@ Returns:
     DataFrame with columns:
         group_a, group_b, n_a, n_b, mean_a, mean_b, var_a, var_b,
         stat, p_value, p_adj, method
+
+##### `compute_flowsom(self, markers: list[str], source_layer: str = 'X', grid_size: int | tuple[int, int] = 10, n_iterations: int = 100, neighborhood_radius: int = 1, learning_rate: float = 0.5, cluster_method: str = 'leiden', cluster_resolution: float = 1.0, n_meta_clusters: int | None = None, random_state: int = 42, verbose: bool = False, inplace: bool = True, use_gpu: bool = True) -> dict[str, Any]`
+
+Compute FlowSOM clustering.
+
+Uses the external ``flowsom`` package (no local reimplementation).
+Results are copied back into this run's AnnData object:
+
+- ``adata.obs['X_flowsom']``: FlowSOM metaclusters
+- ``adata.obsm['X_flowsom_node']``: SOM node assignment per cell
+- ``adata.varm['flowsom_weights']``: SOM codebook (markers x nodes)
+
+Args:
+    markers: Markers to use for clustering (must exist in `adata.var_names`).
+    source_layer: Layer used for expression values (`X` or layer key).
+    grid_size: SOM grid size (10x10) or (rows, cols) tuple.
+    n_iterations: FlowSOM training passes (`rlen`).
+    neighborhood_radius: Kept for compatibility (stored in metadata).
+    learning_rate: Initial FlowSOM learning rate (`alpha[0]`).
+    cluster_method: Kept for compatibility. FlowSOM metaclustering is
+        always used as final labels.
+    cluster_resolution: Backward-compatible hint used to derive default
+        ``n_meta_clusters`` when not provided.
+    n_meta_clusters: Explicit number of FlowSOM metaclusters.
+    random_state: RNG seed.
+    verbose: If True, print progress to stdout.
+    inplace: If True, persist results to run zarr.
+    use_gpu: If True, request MPS when available (best-effort; only
+        used when the installed FlowSOM backend exposes a ``device``
+        parameter).
+
+Returns:
+    Metadata dict with FlowSOM metadata stored under
+    `adata.uns["clusterings"]["X_flowsom"]` and `adata.uns["flowsom"]`.
+
+##### `compute_rmt_spectrum(self, markers = None, layer = None, groupby = None, matrix = 'marker_cov', standardize = True, n_cells = 10000, sigma_sq = None, random_state = 0, uns_key = 'rmt_spectrum', plot = False, inplace = True)`
+
+Compute the marker eigenvalue spectrum and compare to the Marchenko-Pastur null.
+
+Uses Random Matrix Theory (RMT) to identify which principal components
+of the marker covariance (or cell Gram) matrix represent genuine
+biological signal vs. sampling noise.  Eigenvalues above the MP upper
+bound ``lambda_max = sigma2 * (1 + sqrt(q))^2`` are classed as signal.
+
+The Marchenko-Pastur law states that for a random n x p matrix with
+i.i.d. entries of variance sigma2, the eigenvalues of the sample
+covariance ``C = X.T @ X / n`` lie within
+``[sigma2*(1-sqrt(q))^2, sigma2*(1+sqrt(q))^2]`` with ``q = p/n``.
+
+Args:
+    markers: Subset of marker names to use.  ``None`` uses all markers.
+    layer: AnnData layer to use.  ``None`` uses ``adata.X``.
+    groupby: ``adata.obs`` column to group by.  When set, the spectrum
+        is computed separately per group.
+    matrix: ``"marker_cov"`` (default) builds the p x p marker
+        covariance matrix.  ``"cell_gram"`` builds the n x n cell Gram
+        matrix ``X @ X.T / p`` on a subsampled cell set.
+    standardize: If ``True``, centre and scale each marker to zero mean
+        and unit variance before analysis.  For ``"marker_cov"`` this
+        yields a correlation matrix (sigma2 = 1 under the null).
+    n_cells: Maximum cells per group.  Randomly subsampled when larger.
+    sigma_sq: Noise variance for the MP distribution.  ``None``
+        auto-estimates as ``trace(C) / p``.
+    random_state: Seed for subsampling.
+    uns_key: Key under which results are stored in ``adata.uns``.
+    plot: If ``True``, return ``(result, fig)`` with a scree plot.
+    inplace: If ``True``, persist the updated AnnData to disk.
+
+Returns:
+    Result dict (or ``(dict, Figure)`` when ``plot=True``).  Contains
+    ``eigenvalues``, ``lambda_max_mp``, ``lambda_min_mp``,
+    ``n_signal``, ``q``, ``sigma_sq``, ``n``, ``p``, ``markers``,
+    ``matrix``.  With ``groupby``, nested under ``"groups"``.
+
+Raises:
+    ValueError: Invalid parameter values or missing data.
+    RunNotIngestedError: Run has not been ingested.
 
 ##### `compute_umap(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, knn_method: str = 'brute', verbose: bool = False, module_name: str = 'mlx_umap', inplace: bool = True) -> dict[str, Any]`
 
@@ -176,7 +341,51 @@ Raises:
     ValueError: If ``cluster_key`` or ``groupby`` are not in
         ``adata.obs``.
 
-##### `ingest(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, common_markers_only: bool = False, drop_columns: list[str] | None = None) -> None`
+##### `gate_cell_cycle(self, marker_map: dict[str, str] | None = None, layer: str | None = None, thresholds: dict[str, float] | None = None, quantile_thresholds: dict[str, float] | None = None, threshold_methods: dict[str, str] | None = None, inplace: bool = True) -> dict[str, Any]`
+
+Assign cells to cell-cycle phases using hierarchical marker gating.
+
+Uses arcsinh-transformed data (``adata.X`` by default, or a named
+layer). Do **not** pass the ``zscore`` layer — gating thresholds are
+calibrated for arcsinh-scale values.
+
+Gating hierarchy (mutually exclusive, applied in order):
+  IdU+      → S_phase
+  pH3+      → M_phase
+  CyclinB1+ → G2_phase
+  pRb+      → Cycling_G1   (if pRb in marker_map)
+  pRb-      → G0_or_quiescent
+  remaining → G1_or_quiescent (when pRb absent)
+
+Args:
+    marker_map: Dict mapping role → actual ``var_name`` column.
+        Required roles: ``IdU``, ``pH3``, ``CyclinB1``.
+        Optional: ``pRb``. If ``None``, auto-detection is attempted
+        from ``adata.var_names`` using known aliases.
+    layer: AnnData layer to read expression from. ``None`` uses
+        ``adata.X`` (typically arcsinh-transformed after ingestion).
+        Avoid ``"zscore"`` — thresholds are not calibrated for it.
+    thresholds: User-supplied thresholds by role. Missing roles use
+        the automatic method.
+    quantile_thresholds: Override the default quantile per role
+        (used when strategy is ``"quantile"``).
+    threshold_methods: Per-role auto-threshold strategy.
+        ``"otsu"`` (default for IdU/pH3/CyclinB1) finds the valley in
+        bimodal distributions. ``"quantile"`` (default for pRb) uses
+        a fixed percentile.
+    inplace: Persist updated AnnData to disk after gating.
+
+Returns:
+    Dict with:
+    - ``gated_df``: cell-level DataFrame with gate columns and
+      ``cell_cycle_phase``.
+    - ``summary``: phase counts and fractions.
+    - ``thresholds``: thresholds used (role → value).
+
+Raises:
+    ValueError: If required markers cannot be found in ``adata.var_names``.
+
+##### `ingest(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, common_markers_only: bool = False, drop_columns: list[str] | None = None, show_marker_coverage: bool = False) -> None`
 
 Ingest files into this run.
 
@@ -189,11 +398,37 @@ Args:
     common_markers_only: If True, drop markers that are not present in
         all files for this run.
     drop_columns: Column names to remove before marker processing
+    show_marker_coverage: If True, display a heatmap after ingestion
+        showing which standard markers are present or absent in each
+        file.  Only markers that are missing from at least one file are
+        shown; if all markers are present in all files the plot is
+        skipped and a message is printed.
 
 Raises:
     MetadataValidationError if metadata validation fails
     MarkerValidationError if marker validation fails
     IngestionError if ingestion fails
+
+##### `ingestion_summary(self) -> pd.DataFrame`
+
+Return a DataFrame summarising every file and sample ingested into this run.
+
+Columns always present:
+
+- ``file_name`` — original filename
+- ``sample_id`` — sample identifier from the metadata sheet
+- ``line_id`` — cell-line identifier
+- ``n_events_file`` — cells read from the file at ingest time
+- ``n_cells_obs`` — cells currently in the zarr (after any QC gating)
+- ``file_type`` — ``"csv"``, ``"fcs"``, ``"parquet"``, …
+- ``file_size_bytes`` — original file size
+- ``ingested_at`` — UTC timestamp of ingestion
+
+Additional metadata columns from the sample metadata sheet (e.g.
+``"condition"``, ``"replicate_id"``) are included when available.
+
+Raises:
+    RunNotIngestedError: If the run has not been ingested yet.
 
 ##### `is_ingested(self) -> bool`
 
@@ -214,7 +449,22 @@ Args:
 Returns:
     Normalized part paths that were locked. ``"."`` means full store.
 
-##### `match_clusterings(self, key_a: str, key_b: str, score_mode: str = 'jaccard', n_permutations: int = 1000, random_state: int = 0) -> dict`
+##### `locked_zarr_parts(self) -> list[str]`
+
+Return which zarr store parts are currently locked (read-only).
+
+Scans the run's zarr store and returns the logical parts — such as
+``"obs"``, ``"layers/raw"`` — that contain any read-only files.
+An empty list means the store is fully writable.
+
+Returns:
+    Sorted list of locked part paths.  ``["."]`` means the entire
+    store is locked.
+
+Raises:
+    RunNotIngestedError: If the run has not been ingested yet.
+
+##### `match_clusterings(self, key_a: str, key_b: str, score_mode: str = 'jaccard', n_permutations: int = 1000, random_state: int = 0, plot: str | bool = False, matrix: str = 'score', annot: bool = True, figsize: tuple[float, float] | None = None) -> dict`
 
 Compare two obs columns (clusterings or any categorical labels).
 
@@ -232,9 +482,23 @@ Args:
     n_permutations: Permutations for global significance test.
         Set to 0 to skip.
     random_state: Random seed.
+    plot: ``False`` (default, no plot), ``"heatmap"`` (seaborn heatmap,
+        no dendrogram), or ``"clustermap"`` (seaborn clustermap with
+        row/column dendrograms).
+    matrix: Which values to display — ``"score"`` (default, the
+        scoring matrix used for matching) or ``"overlap"`` (raw cell
+        counts from the contingency table).
+    annot: Annotate each cell with its value.  Default ``True``.
+    figsize: Figure size passed to the plot.  When ``None`` a
+        sensible default is chosen based on the matrix dimensions.
 
 Returns:
-    dict with keys:
+    When ``plot=False``: the report ``dict``.
+    When ``plot`` is set: ``(report_dict, figure)`` where *figure* is
+    the ``matplotlib.figure.Figure`` for a heatmap or the
+    ``seaborn.ClusterGrid`` for a clustermap.
+
+    Report dict keys:
 
     - ``A_to_B`` — every A label matched to its best B label
     - ``B_to_A`` — every B label matched to its best A label
@@ -247,7 +511,8 @@ Returns:
     - ``permutation_p_A_to_B``, ``_B_to_A``, ``_one_to_one``
 
 Raises:
-    ValueError: If either key is not in ``adata.obs``.
+    ValueError: If either key is not in ``adata.obs``, or ``plot``/
+        ``matrix`` are invalid values.
 
 ##### `normalize_with_cytof_transform(self, control_markers: list[str], markers_to_correct: list[str], source_layer: str = 'raw', corrected_layer: str = 'normalized', z_layer: str = 'normalized_z', groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, anchor_to_median: bool = True, zscore: bool = True, module_name: str = 'cytof_transform', inplace: bool = True) -> dict[str, Any]`
 
@@ -269,6 +534,24 @@ Args:
 
 Returns:
     Summary dictionary of normalization outputs and settings.
+
+##### `open_cell_cycle_app(self, port: int = 8502) -> 'subprocess.Popen'`
+
+Launch the cell-cycle gating Streamlit app pre-loaded with this run.
+
+Opens http://localhost:<port> in the browser automatically.
+The app shows Auto-threshold and Interactive-slider tabs — click
+"Apply Gating" to write the chosen thresholds back to the stored adata.
+
+Afterwards, call the Section 9 cell in the notebook to pick up the
+saved thresholds from ``adata.uns["cell_cycle_gating"]["latest"]``.
+
+Args:
+    port: Local port to serve on (default 8502 to avoid clashing with
+          the full CyTOF app on 8501).
+
+Returns:
+    The ``subprocess.Popen`` handle — call ``proc.terminate()`` to stop.
 
 ##### `permcell_to_adata(self, result_prefix: str = 'permcell', score: str = 'z', smoothed: bool = True, embedding_key: str | None = None) -> anndata.AnnData`
 
@@ -451,12 +734,15 @@ Args:
 Returns:
     Boolean pass mask indexed by original `obs_names`.
 
-##### `read_adata(self, backed: bool = False)`
+##### `read_adata(self, backed: bool = False, force: bool = False)`
 
 Read the ingested AnnData object.
 
 Args:
     backed: Whether to use backed mode (currently ignored)
+    force: Re-read from disk even if an in-memory copy is cached.
+        Use this after external modifications (e.g. gating via the
+        Streamlit app) to pick up changes written by another process.
 
 Returns:
     AnnData object
@@ -501,6 +787,30 @@ Raises:
 ##### `save_adata(self, adata: anndata.AnnData | None = None) -> None`
 
 Alias for `save()` for explicit naming in notebooks.
+
+##### `save_as_new_run(self, adata: anndata.AnnData, new_run_id: str, run_name: str | None = None, notes: str | None = None) -> 'Run'`
+
+Persist an arbitrary AnnData as a brand-new run in the same project.
+
+Unlike ``save_adata(adata)``, which overwrites the *current* run, this
+method registers a fresh run and writes the provided AnnData to it.
+Panel metadata (panel_id, instrument, …) is copied from the source run.
+
+Typical use case — save a balanced subsample without destroying the full
+run's data::
+
+    adata_sub = run.subsample_by_group("sample_id", n_per_group=5000)
+    sub_run = run.save_as_new_run(adata_sub, new_run_id="CyTOF1_sub")
+
+Args:
+    adata: AnnData to persist (e.g. from ``subsample_by_group``).
+    new_run_id: ID for the new run.  Must not already exist in the project.
+    run_name: Optional display name; defaults to
+        ``"<source run name> (subset)"``.
+    notes: Optional free-text notes attached to the new run's metadata.
+
+Returns:
+    The newly created and saved ``Run`` object.
 
 ##### `set_x_from_layer(self, layer: str, inplace: bool = True) -> None`
 
@@ -559,6 +869,73 @@ Args:
 Returns:
     Normalized part paths that were unlocked. ``"."`` means full store.
 
+##### `vendi_score(self, k: int = 15, markers: list[str] | None = None, layer: str | None = None, use_rep: str | None = None, metric: str = 'cosine', obs_key: str = 'vendi_score', groupby: str | list[str] | None = None, sigma: float | None = None, n_bins: int = 10, n_reps: int = 1, m: int | None = None, random_state: int = 0, return_eigenvalues: bool = False, inplace: bool = True) -> np.ndarray | pd.DataFrame | tuple[pd.DataFrame, dict[str, np.ndarray]]`
+
+Compute Vendi score over local k-NN neighborhoods or whole groups.
+
+**Per-cell mode** (``groupby=None``): for each cell i, features of its
+k-nearest-neighbor neighborhood N_k(i) are binned with
+``KBinsDiscretizer`` (uniform) then scored with
+``vendi_score.vendi.score_dual``.  With rarefaction (``n_reps > 1``),
+results are bootstrap-averaged and 95 % CI bounds are also stored in
+``adata.obs`` as ``{obs_key}_ci_low`` / ``{obs_key}_ci_high``.
+
+**Per-group mode** (``groupby`` set): for each unique value (or
+combination of values when ``groupby`` is a list) in the chosen
+``adata.obs`` column(s), all cells belonging to that group are
+rarefied, binned, and scored.  Returns a DataFrame indexed by group
+label (MultiIndex when ``groupby`` is a list) with columns
+``vendi_score``, ``ci_low``, ``ci_high``, stored in
+``adata.uns["vendi"][obs_key]``.
+
+Args:
+    k: Number of nearest neighbors per cell (per-cell mode only).
+    markers: Subset of marker names (``adata.var_names``) to use as
+        features. ``None`` uses all markers. Ignored when ``use_rep``
+        is set.
+    layer: AnnData layer to use as the feature matrix. ``None`` uses
+        ``adata.X``.
+    use_rep: Key in ``adata.obsm`` to use instead of marker expression
+        (e.g. ``"X_umap"``). When provided, ``layer`` is ignored.
+    metric: ``"cosine"`` uses ``score_dual`` on binned features;
+        ``"rbf"`` builds a Gaussian kernel matrix and calls
+        ``score_K``.
+    obs_key: Storage key: ``adata.obs`` column (per-cell) or
+        ``adata.uns["vendi"]`` key (per-group).
+    groupby: ``adata.obs`` column(s) to group by (e.g. ``"leiden"``,
+        ``["condition", "cell_cycle"]``). When a list is given, one
+        score is produced per unique combination of values.
+    sigma: Bandwidth for the RBF kernel. Defaults to the median
+        pairwise distance in the data.
+    n_bins: Number of uniform bins for ``KBinsDiscretizer``.
+    n_reps: Bootstrap repetitions. ``1`` scores once without
+        bootstrapping.
+    m: Subsample size per repetition. Defaults to pool size
+        (``k + 1`` per-cell, group size per-group).
+    random_state: Seed for the bootstrap RNG.
+    return_eigenvalues: Per-group mode only. When ``True``, also
+        compute the eigenvalue spectrum of the dual kernel for each
+        group (using the full binned pool, no subsampling) and return
+        ``(DataFrame, {group: eigenvalues_array})``. Eigenvalues are
+        also stored in ``adata.uns["vendi"][obs_key + "_eigenvalues"]``.
+    inplace: If ``True``, persist the updated AnnData to disk.
+
+Returns:
+    Per-cell: ``np.ndarray`` of shape ``(n_cells,)`` stored in
+    ``adata.obs[obs_key]``.
+
+    Per-group (``return_eigenvalues=False``): ``pd.DataFrame`` indexed
+    by group label, stored in ``adata.uns["vendi"][obs_key]``.
+
+    Per-group (``return_eigenvalues=True``): ``(DataFrame, dict)``
+    where the dict maps each group label to a sorted
+    ``np.ndarray`` of eigenvalues (ascending).
+
+Raises:
+    ValueError: If ``metric`` is invalid, ``groupby`` column is
+        missing, or the requested ``layer``/``use_rep`` does not exist.
+    RunNotIngestedError: If the run has not been ingested yet.
+
 ##### `zarr_path(self) -> Path`
 
 Get the path to the Zarr file.
@@ -582,66 +959,3 @@ Args:
 
 Returns:
     Summary dictionary with balancing and z-score metadata.
-
-##### `compute_rmt_spectrum(self, markers=None, layer=None, groupby=None, matrix='marker_cov', standardize=True, n_cells=10000, sigma_sq=None, random_state=0, uns_key='rmt_spectrum', plot=False, inplace=True)`
-
-Compute the marker eigenvalue spectrum and compare to the Marchenko-Pastur null.
-
-Uses Random Matrix Theory (RMT) to identify which principal components of the
-marker covariance (or cell Gram) matrix represent genuine biological signal vs.
-sampling noise.  Eigenvalues above `lambda_max = sigma2 * (1 + sqrt(q))^2` are
-classed as signal, where `q = p/n` is the aspect ratio.
-
-Args:
-    markers: Subset of marker names. `None` uses all markers.
-    layer: AnnData layer. `None` uses `adata.X`.
-    groupby: `adata.obs` column to group by. When set, spectrum is computed
-        per group.
-    matrix: `"marker_cov"` (default) builds the p x p marker covariance.
-        `"cell_gram"` builds the n x n cell Gram matrix `X @ X.T / p`.
-    standardize: Centre and scale each marker to unit variance. For
-        `"marker_cov"` this yields a correlation matrix (sigma2=1 under null).
-    n_cells: Max cells per group (randomly subsampled when larger).
-    sigma_sq: Noise variance for MP. `None` auto-estimates as `trace(C)/p`.
-    random_state: Seed for subsampling.
-    uns_key: Storage key in `adata.uns`.
-    plot: If `True`, return `(result, fig)` with a scree plot.
-    inplace: If `True`, persist to disk.
-
-Returns:
-    Result dict with `eigenvalues`, `lambda_max_mp`, `lambda_min_mp`,
-    `n_signal`, `q`, `sigma_sq`, `n`, `p`, `markers`, `matrix`.
-    With `groupby`, results are nested under `"groups"`.
-    Returns `(dict, Figure)` when `plot=True`.
-
-##### `bootstrap_rmt_spectrum(self, markers=None, layer=None, groupby=None, matrix='marker_cov', standardize=True, n_cells=10000, frac=0.8, n_bootstrap=200, random_state=0, uns_key='rmt_bootstrap', plot=False, inplace=True)`
-
-Bootstrap stability of the RMT eigenvalue spectrum.
-
-Repeatedly subsamples a fraction of cells and recomputes the eigenvalue
-spectrum to quantify estimation uncertainty.  For `matrix="marker_cov"` also
-reports eigenvector stability as mean |cos θ| per component.
-
-Args:
-    markers: Subset of marker names. `None` uses all.
-    layer: AnnData layer. `None` uses `adata.X`.
-    groupby: `adata.obs` column to group by.
-    matrix: `"marker_cov"` or `"cell_gram"`.
-    standardize: Centre and scale each marker before analysis.
-    n_cells: Max cell pool size per group before bootstrapping.
-    frac: Fraction of pool drawn without replacement per replicate.
-    n_bootstrap: Number of bootstrap resamples.
-    random_state: Seed for the RNG.
-    uns_key: Storage key in `adata.uns`.
-    plot: If `True`, return `(result, fig)` with eigenvalue distribution
-        violins and eigenvector stability bar chart.
-    inplace: If `True`, persist to disk.
-
-Returns:
-    Result dict with `eigenvalue_ref`, `eigenvalue_matrix`, `eigenvalue_mean`,
-    `eigenvalue_std`, `eigenvalue_ci_low`, `eigenvalue_ci_high`,
-    `eigenvector_stability` (marker_cov only), `lambda_max_mp_ref`,
-    `lambda_max_mp_distribution`, `n_signal_ref`, `markers`, `matrix`.
-    With `groupby`, nested under `"groups"`.
-    Returns `(dict, Figure)` when `plot=True`.
-

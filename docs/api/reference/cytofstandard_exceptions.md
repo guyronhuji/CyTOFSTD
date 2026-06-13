@@ -4,6 +4,21 @@
 
 Custom exception classes for cytofstandard package.
 
+## Public Exports (`__all__`)
+
+- `CytofStandardError`
+- `ProjectExistsError`
+- `ProjectValidationError`
+- `RunExistsError`
+- `RunNotFoundError`
+- `RunValidationError`
+- `RunNotIngestedError`
+- `MetadataValidationError`
+- `MarkerValidationError`
+- `IngestionError`
+- `FileFormatError`
+- `ZarrLockedError`
+
 ## Top-level Functions
 
 No public top-level functions.
@@ -115,6 +130,16 @@ No public methods.
 - Inherits: `CytofStandardError`
 
 Raised when run validation fails.
+
+#### Methods
+
+No public methods.
+
+### `ZarrLockedError`
+
+- Inherits: `CytofStandardError`
+
+Raised when a write is attempted on a read-only (locked) Zarr store part.
 
 #### Methods
 

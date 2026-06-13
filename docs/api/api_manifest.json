@@ -1,8 +1,8 @@
 {
-  "generated_at": "2026-05-19T14:41:41.319861+00:00",
+  "generated_at": "2026-06-13T17:07:56.115501+00:00",
   "generator": "scripts/generate_api_docs.py",
   "package": "cytofstandard",
-  "module_count": 14,
+  "module_count": 15,
   "modules": [
     {
       "module": "cytofstandard",
@@ -21,16 +21,126 @@
         "RunNotIngestedError",
         "MetadataValidationError",
         "MarkerValidationError",
-        "IngestionError"
+        "IngestionError",
+        "ZarrLockedError"
       ],
       "functions": [],
+      "classes": []
+    },
+    {
+      "module": "cytofstandard.cell_cycle",
+      "file_path": "cytofstandard/cell_cycle.py",
+      "summary": "Cell-cycle gating for CyTOF data using IdU, pH3, CyclinB1, and pRb.",
+      "exports": [],
+      "functions": [
+        {
+          "name": "add_cell_cycle_pseudotime",
+          "signature": "(data: Any, phase_col: str = 'cell_cycle_phase', marker_cols: dict[str, str] | None = None, output_col: str = 'cell_cycle_pseudotime', angle_col: str = 'cell_cycle_angle', method: str = 'rank_within_phase', phase_order: list[str] | None = None, phase_widths: dict[str, float] | None = None, overwrite: bool = False, copy: bool = True) -> Any",
+          "summary": "Add a continuous cell-cycle pseudotime coordinate to gated CyTOF data.",
+          "decorators": []
+        },
+        {
+          "name": "assign_cell_cycle_phase",
+          "signature": "(marker_df: pd.DataFrame, marker_map: dict[str, str], thresholds: dict[str, float]) -> pd.DataFrame",
+          "summary": "Assign cells to mutually exclusive cell-cycle phases.",
+          "decorators": []
+        },
+        {
+          "name": "auto_detect_cell_cycle_markers",
+          "signature": "(var_names: list[str], aliases: dict[str, list[str]] | None = None) -> dict[str, str]",
+          "summary": "Try to find cell-cycle marker columns in a list of variable names.",
+          "decorators": []
+        },
+        {
+          "name": "calculate_thresholds",
+          "signature": "(marker_df: pd.DataFrame, marker_map: dict[str, str], thresholds: dict[str, float] | None = None, quantile_thresholds: dict[str, float] | None = None, threshold_methods: dict[str, str] | None = None) -> dict[str, float]",
+          "summary": "Compute per-marker gating thresholds.",
+          "decorators": []
+        },
+        {
+          "name": "extract_marker_dataframe",
+          "signature": "(data: Any, marker_map: dict[str, str], layer: str | None = None) -> pd.DataFrame",
+          "summary": "Extract cell-cycle marker columns from a DataFrame or AnnData.",
+          "decorators": []
+        },
+        {
+          "name": "gate_cell_cycle",
+          "signature": "(data: Any, marker_map: dict[str, str], layer: str | None = None, thresholds: dict[str, float] | None = None, quantile_thresholds: dict[str, float] | None = None, threshold_methods: dict[str, str] | None = None, apply_arcsinh: bool = False, cofactor: float = 5.0, return_adata: bool = True) -> dict[str, Any]",
+          "summary": "Full cell-cycle gating workflow for a DataFrame or AnnData.",
+          "decorators": []
+        },
+        {
+          "name": "gate_cell_cycle_by_group",
+          "signature": "(data: Any, marker_map: dict[str, str], groupby: str, layer: str | None = None, thresholds: dict[str, float] | None = None, quantile_thresholds: dict[str, float] | None = None, threshold_methods: dict[str, str] | None = None, apply_arcsinh: bool = False, cofactor: float = 5.0) -> dict[str, Any]",
+          "summary": "Cell-cycle gating with independent threshold calculation per group.",
+          "decorators": []
+        },
+        {
+          "name": "plot_cell_cycle_fractions_by_group",
+          "signature": "(gated_df: pd.DataFrame, groupby: str, figsize: tuple[float, float] | None = None) -> 'plt.Figure'",
+          "summary": "Stacked bar chart of phase fractions per group.",
+          "decorators": []
+        },
+        {
+          "name": "plot_cell_cycle_marker_qc",
+          "signature": "(marker_df: pd.DataFrame, marker_map: dict[str, str], thresholds: dict[str, float] | None = None, n_bins: int = 80, figsize: tuple[float, float] | None = None, output_dir: str | None = None) -> list",
+          "summary": "Plot the distribution of each marker with an optional threshold line.",
+          "decorators": []
+        },
+        {
+          "name": "plot_cell_cycle_phase_circle",
+          "signature": "(data: Any, angle_col: str = 'cell_cycle_angle', phase_col: str = 'cell_cycle_phase', n_subsample: int = 5000, seed: int = 42) -> 'plt.Figure'",
+          "summary": "Polar scatter plot of cell positions on the cell-cycle circle.",
+          "decorators": []
+        },
+        {
+          "name": "plot_cell_cycle_phase_fractions",
+          "signature": "(summary: pd.DataFrame, figsize: tuple[float, float] | None = None, output_path: str | None = None) -> 'plt.Figure'",
+          "summary": "Bar chart of cell-cycle phase fractions.",
+          "decorators": []
+        },
+        {
+          "name": "plot_cell_cycle_pseudotime_markers",
+          "signature": "(data: Any, pseudotime_col: str = 'cell_cycle_pseudotime', phase_col: str = 'cell_cycle_phase', marker_cols: list[str] | dict[str, str] | None = None, bins: int = 50, use_hexbin: bool = True, figsize_per_marker: tuple[float, float] = (5, 3)) -> 'plt.Figure'",
+          "summary": "Plot marker intensity vs cell-cycle pseudotime for validation.",
+          "decorators": []
+        },
+        {
+          "name": "plot_marker_thresholds",
+          "signature": "(df: pd.DataFrame, marker_map: dict[str, str], thresholds: dict[str, float] | None = None, n_bins: int = 80, figsize: tuple[float, float] | None = None) -> list",
+          "summary": "Alias for :func:`plot_cell_cycle_marker_qc` (spec compatibility).",
+          "decorators": []
+        },
+        {
+          "name": "summarize_cell_cycle",
+          "signature": "(gated_df: pd.DataFrame) -> pd.DataFrame",
+          "summary": "Return counts and fractions for each cell-cycle phase.",
+          "decorators": []
+        }
+      ],
       "classes": []
     },
     {
       "module": "cytofstandard.config",
       "file_path": "cytofstandard/config.py",
       "summary": "Configuration for cytofstandard.",
-      "exports": [],
+      "exports": [
+        "__version__",
+        "DEFAULT_FCS_READER",
+        "DEFAULT_BATCH_SIZE",
+        "DEFAULT_STRICT_MARKERS",
+        "DEFAULT_ALLOW_EXTRA_MARKERS",
+        "DEFAULT_STORAGE_FORMAT",
+        "DEFAULT_ZARR_COMPRESSOR",
+        "DEFAULT_ZARR_COMPRESSION_LEVEL",
+        "DEFAULT_UUID_STRATEGY",
+        "RUN_DIR_PATTERN",
+        "ZARR_FILE_PATTERN",
+        "STATUS_REGISTERED",
+        "STATUS_INGESTED",
+        "STATUS_FAILED_INGESTION",
+        "STATUS_VALUES"
+      ],
       "functions": [],
       "classes": []
     },
@@ -38,7 +148,20 @@
       "module": "cytofstandard.exceptions",
       "file_path": "cytofstandard/exceptions.py",
       "summary": "Custom exception classes for cytofstandard package.",
-      "exports": [],
+      "exports": [
+        "CytofStandardError",
+        "ProjectExistsError",
+        "ProjectValidationError",
+        "RunExistsError",
+        "RunNotFoundError",
+        "RunValidationError",
+        "RunNotIngestedError",
+        "MetadataValidationError",
+        "MarkerValidationError",
+        "IngestionError",
+        "FileFormatError",
+        "ZarrLockedError"
+      ],
       "functions": [],
       "classes": [
         {
@@ -128,6 +251,14 @@
             "CytofStandardError"
           ],
           "methods": []
+        },
+        {
+          "name": "ZarrLockedError",
+          "summary": "Raised when a write is attempted on a read-only (locked) Zarr store part.",
+          "bases": [
+            "CytofStandardError"
+          ],
+          "methods": []
         }
       ]
     },
@@ -147,7 +278,9 @@
       "module": "cytofstandard.io.csv",
       "file_path": "cytofstandard/io/csv.py",
       "summary": "CSV file reader for cytofstandard.",
-      "exports": [],
+      "exports": [
+        "read_csv"
+      ],
       "functions": [
         {
           "name": "read_csv",
@@ -162,7 +295,9 @@
       "module": "cytofstandard.io.fcs",
       "file_path": "cytofstandard/io/fcs.py",
       "summary": "FCS file reader for cytofstandard.",
-      "exports": [],
+      "exports": [
+        "read_fcs"
+      ],
       "functions": [
         {
           "name": "read_fcs",
@@ -177,7 +312,9 @@
       "module": "cytofstandard.io.parquet",
       "file_path": "cytofstandard/io/parquet.py",
       "summary": "Parquet file reader for cytofstandard.",
-      "exports": [],
+      "exports": [
+        "read_parquet"
+      ],
       "functions": [
         {
           "name": "read_parquet",
@@ -192,7 +329,9 @@
       "module": "cytofstandard.markers",
       "file_path": "cytofstandard/markers.py",
       "summary": "Marker registry for standardizing marker names.",
-      "exports": [],
+      "exports": [
+        "MarkerRegistry"
+      ],
       "functions": [],
       "classes": [
         {
@@ -310,7 +449,19 @@
       "module": "cytofstandard.provenance",
       "file_path": "cytofstandard/provenance.py",
       "summary": "Provenance logging utilities for cytofstandard.",
-      "exports": [],
+      "exports": [
+        "ProvenanceLogger",
+        "get_timestamp",
+        "log_project_created",
+        "log_project_loaded",
+        "log_run_registered",
+        "log_run_loaded",
+        "log_run_removed",
+        "log_run_renamed",
+        "log_ingestion_started",
+        "log_run_ingested",
+        "log_ingestion_failed"
+      ],
       "functions": [
         {
           "name": "get_timestamp",
@@ -404,9 +555,21 @@
           "bases": [],
           "methods": [
             {
+              "name": "add_cell_cycle_pseudotime",
+              "signature": "(self, marker_cols: dict[str, str] | None = None, phase_col: str = 'cell_cycle_phase', output_col: str = 'cell_cycle_pseudotime', angle_col: str = 'cell_cycle_angle', phase_order: list[str] | None = None, phase_widths: dict[str, float] | None = None, overwrite: bool = False, inplace: bool = True) -> 'anndata.AnnData'",
+              "summary": "Add a continuous cell-cycle pseudotime coordinate to this run.",
+              "decorators": []
+            },
+            {
               "name": "annotate_clusters",
               "signature": "(self, cluster_key: str, annotation_map: dict[str, str], output_key: str | None = None, inplace: bool = True) -> pd.Series",
               "summary": "Map cluster labels to named cell types.",
+              "decorators": []
+            },
+            {
+              "name": "bootstrap_rmt_spectrum",
+              "signature": "(self, markers = None, layer = None, groupby = None, matrix = 'marker_cov', standardize = True, n_cells = 10000, frac = 0.8, n_bootstrap = 200, random_state = 0, uns_key = 'rmt_bootstrap', plot = False, inplace = True)",
+              "summary": "Bootstrap stability of the RMT eigenvalue spectrum.",
               "decorators": []
             },
             {
@@ -425,6 +588,18 @@
               "name": "compare_groups",
               "signature": "(self, field: str, groupby, layer: str = 'X', comparisons: str | list[tuple[str, str]] | None = 'all', method: str = 'ttest', equal_var: bool = True, order: list[str] | None = None, multitest: str | None = 'bh') -> pd.DataFrame",
               "summary": "Compute pairwise group comparisons for a marker or numeric obs field.",
+              "decorators": []
+            },
+            {
+              "name": "compute_flowsom",
+              "signature": "(self, markers: list[str], source_layer: str = 'X', grid_size: int | tuple[int, int] = 10, n_iterations: int = 100, neighborhood_radius: int = 1, learning_rate: float = 0.5, cluster_method: str = 'leiden', cluster_resolution: float = 1.0, n_meta_clusters: int | None = None, random_state: int = 42, verbose: bool = False, inplace: bool = True, use_gpu: bool = True) -> dict[str, Any]",
+              "summary": "Compute FlowSOM clustering.",
+              "decorators": []
+            },
+            {
+              "name": "compute_rmt_spectrum",
+              "signature": "(self, markers = None, layer = None, groupby = None, matrix = 'marker_cov', standardize = True, n_cells = 10000, sigma_sq = None, random_state = 0, uns_key = 'rmt_spectrum', plot = False, inplace = True)",
+              "summary": "Compute the marker eigenvalue spectrum and compare to the Marchenko-Pastur null.",
               "decorators": []
             },
             {
@@ -452,9 +627,21 @@
               "decorators": []
             },
             {
+              "name": "gate_cell_cycle",
+              "signature": "(self, marker_map: dict[str, str] | None = None, layer: str | None = None, thresholds: dict[str, float] | None = None, quantile_thresholds: dict[str, float] | None = None, threshold_methods: dict[str, str] | None = None, inplace: bool = True) -> dict[str, Any]",
+              "summary": "Assign cells to cell-cycle phases using hierarchical marker gating.",
+              "decorators": []
+            },
+            {
               "name": "ingest",
-              "signature": "(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, common_markers_only: bool = False, drop_columns: list[str] | None = None) -> None",
+              "signature": "(self, files: list[str], sample_metadata: str, copy_raw: bool = True, strict_markers: bool = True, allow_extra_markers: bool = False, common_markers_only: bool = False, drop_columns: list[str] | None = None, show_marker_coverage: bool = False) -> None",
               "summary": "Ingest files into this run.",
+              "decorators": []
+            },
+            {
+              "name": "ingestion_summary",
+              "signature": "(self) -> pd.DataFrame",
+              "summary": "Return a DataFrame summarising every file and sample ingested into this run.",
               "decorators": []
             },
             {
@@ -470,8 +657,14 @@
               "decorators": []
             },
             {
+              "name": "locked_zarr_parts",
+              "signature": "(self) -> list[str]",
+              "summary": "Return which zarr store parts are currently locked (read-only).",
+              "decorators": []
+            },
+            {
               "name": "match_clusterings",
-              "signature": "(self, key_a: str, key_b: str, score_mode: str = 'jaccard', n_permutations: int = 1000, random_state: int = 0) -> dict",
+              "signature": "(self, key_a: str, key_b: str, score_mode: str = 'jaccard', n_permutations: int = 1000, random_state: int = 0, plot: str | bool = False, matrix: str = 'score', annot: bool = True, figsize: tuple[float, float] | None = None) -> dict",
               "summary": "Compare two obs columns (clusterings or any categorical labels).",
               "decorators": []
             },
@@ -479,6 +672,12 @@
               "name": "normalize_with_cytof_transform",
               "signature": "(self, control_markers: list[str], markers_to_correct: list[str], source_layer: str = 'raw', corrected_layer: str = 'normalized', z_layer: str = 'normalized_z', groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, anchor_to_median: bool = True, zscore: bool = True, module_name: str = 'cytof_transform', inplace: bool = True) -> dict[str, Any]",
               "summary": "Normalize markers using external cytof_transform, per sample/line group.",
+              "decorators": []
+            },
+            {
+              "name": "open_cell_cycle_app",
+              "signature": "(self, port: int = 8502) -> 'subprocess.Popen'",
+              "summary": "Launch the cell-cycle gating Streamlit app pre-loaded with this run.",
               "decorators": []
             },
             {
@@ -537,7 +736,7 @@
             },
             {
               "name": "read_adata",
-              "signature": "(self, backed: bool = False)",
+              "signature": "(self, backed: bool = False, force: bool = False)",
               "summary": "Read the ingested AnnData object.",
               "decorators": []
             },
@@ -569,6 +768,12 @@
               "name": "save_adata",
               "signature": "(self, adata: anndata.AnnData | None = None) -> None",
               "summary": "Alias for `save()` for explicit naming in notebooks.",
+              "decorators": []
+            },
+            {
+              "name": "save_as_new_run",
+              "signature": "(self, adata: anndata.AnnData, new_run_id: str, run_name: str | None = None, notes: str | None = None) -> 'Run'",
+              "summary": "Persist an arbitrary AnnData as a brand-new run in the same project.",
               "decorators": []
             },
             {
@@ -604,6 +809,12 @@
               "decorators": []
             },
             {
+              "name": "vendi_score",
+              "signature": "(self, k: int = 15, markers: list[str] | None = None, layer: str | None = None, use_rep: str | None = None, metric: str = 'cosine', obs_key: str = 'vendi_score', groupby: str | list[str] | None = None, sigma: float | None = None, n_bins: int = 10, n_reps: int = 1, m: int | None = None, random_state: int = 0, return_eigenvalues: bool = False, inplace: bool = True) -> np.ndarray | pd.DataFrame | tuple[pd.DataFrame, dict[str, np.ndarray]]",
+              "summary": "Compute Vendi score over local k-NN neighborhoods or whole groups.",
+              "decorators": []
+            },
+            {
               "name": "zarr_path",
               "signature": "(self) -> Path",
               "summary": "Get the path to the Zarr file.",
@@ -623,7 +834,22 @@
       "module": "cytofstandard.storage",
       "file_path": "cytofstandard/storage.py",
       "summary": "Storage utilities for cytofstandard.",
-      "exports": [],
+      "exports": [
+        "compute_sha256",
+        "compute_file_hashes",
+        "read_yaml",
+        "write_yaml",
+        "read_parquet",
+        "write_parquet",
+        "ensure_directory",
+        "get_directory_size",
+        "copy_file",
+        "file_exists",
+        "directory_exists",
+        "copy_files_to_directory",
+        "set_zarr_parts_writable",
+        "get_locked_zarr_parts"
+      ],
       "functions": [
         {
           "name": "compute_file_hashes",
@@ -674,6 +900,12 @@
           "decorators": []
         },
         {
+          "name": "get_locked_zarr_parts",
+          "signature": "(zarr_root: str | Path) -> list[str]",
+          "summary": "Return logical zarr parts that contain any read-only files.",
+          "decorators": []
+        },
+        {
           "name": "read_parquet",
           "signature": "(file_path: str) -> pd.DataFrame",
           "summary": "Read a Parquet file.",
@@ -710,7 +942,10 @@
       "module": "cytofstandard.uuid_utils",
       "file_path": "cytofstandard/uuid_utils.py",
       "summary": "UUID generation utilities for cytofstandard.",
-      "exports": [],
+      "exports": [
+        "generate_cell_uuid",
+        "generate_file_uuid"
+      ],
       "functions": [
         {
           "name": "generate_cell_uuid",
@@ -731,7 +966,13 @@
       "module": "cytofstandard.validation",
       "file_path": "cytofstandard/validation.py",
       "summary": "Validation utilities for cytofstandard.",
-      "exports": [],
+      "exports": [
+        "validate_file_list",
+        "validate_sample_metadata",
+        "validate_sample_id_unique",
+        "validate_marker_consistency",
+        "normalize_marker_name"
+      ],
       "functions": [
         {
           "name": "normalize_marker_name",

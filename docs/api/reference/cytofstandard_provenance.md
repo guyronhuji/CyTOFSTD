@@ -4,6 +4,20 @@
 
 Provenance logging utilities for cytofstandard.
 
+## Public Exports (`__all__`)
+
+- `ProvenanceLogger`
+- `get_timestamp`
+- `log_project_created`
+- `log_project_loaded`
+- `log_run_registered`
+- `log_run_loaded`
+- `log_run_removed`
+- `log_run_renamed`
+- `log_ingestion_started`
+- `log_run_ingested`
+- `log_ingestion_failed`
+
 ## Top-level Functions
 
 ### `get_timestamp() -> str`

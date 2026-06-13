@@ -4,6 +4,14 @@
 
 Validation utilities for cytofstandard.
 
+## Public Exports (`__all__`)
+
+- `validate_file_list`
+- `validate_sample_metadata`
+- `validate_sample_id_unique`
+- `validate_marker_consistency`
+- `normalize_marker_name`
+
 ## Top-level Functions
 
 ### `normalize_marker_name(name: str) -> str`

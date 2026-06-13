@@ -4,6 +4,10 @@
 
 CSV file reader for cytofstandard.
 
+## Public Exports (`__all__`)
+
+- `read_csv`
+
 ## Top-level Functions
 
 ### `read_csv(file_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]`

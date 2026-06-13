@@ -5838,6 +5838,107 @@ class Run:
             "thresholds": result["thresholds"],
         }
 
+    def add_cell_cycle_pseudotime(
+        self,
+        marker_cols: dict[str, str] | None = None,
+        phase_col: str = "cell_cycle_phase",
+        output_col: str = "cell_cycle_pseudotime",
+        angle_col: str = "cell_cycle_angle",
+        phase_order: list[str] | None = None,
+        phase_widths: dict[str, float] | None = None,
+        overwrite: bool = False,
+        inplace: bool = True,
+    ) -> "anndata.AnnData":
+        """Add a continuous cell-cycle pseudotime coordinate to this run.
+
+        Requires that :meth:`gate_cell_cycle` has already been run so that
+        ``adata.obs["cell_cycle_phase"]`` exists.
+
+        Within each phase, ordering is based on marker intensity ranks:
+
+        * **G0/G1 phases** — ``pRb`` (increases as CDK4/6 phosphorylate Rb)
+        * **S phase** — ``DNA`` (content increases through replication)
+        * **G2 phase** — ``CyclinB1`` (accumulates before M entry)
+        * **M phase** — ``pH3`` (peaks during mitosis)
+
+        Args:
+            marker_cols: Dict mapping role → actual column name, e.g.
+                ``{"pRb": "pRb", "DNA": "DNA", "CyclinB1": "CyclinB1",
+                "pH3": "pH3", "IdU": "IdU"}``.
+                If ``None``, the gating marker map stored in
+                ``adata.uns["cell_cycle_gating"]`` is used for the gating
+                markers (IdU/pH3/CyclinB1/pRb); **DNA must still be added
+                manually** if it is needed for within-S ordering.
+            phase_col: Column in ``adata.obs`` with categorical phase labels.
+            output_col: Output column name for pseudotime.
+            angle_col: Output column name for the 2π angle.
+            phase_order: Custom biological ordering of phase labels.
+            phase_widths: Dict of phase → fractional arc width (summed to 1).
+            overwrite: Overwrite existing pseudotime columns. Default False.
+            inplace: Persist updated AnnData to disk. Default True.
+
+        Returns:
+            Updated AnnData object (with pseudotime columns in ``obs``).
+
+        Example::
+
+            run.add_cell_cycle_pseudotime(
+                marker_cols={
+                    "pRb": "pRb", "IdU": "IdU",
+                    "CyclinB1": "CyclinB1", "pH3": "pH3",
+                    "DNA": "DNA",
+                },
+                overwrite=True,
+            )
+        """
+        from cytofstandard.cell_cycle import (
+            add_cell_cycle_pseudotime as _add_pt,
+        )
+
+        self.require_ingested()
+        adata = self.read_adata()
+
+        # Auto-fill from stored gating marker_map if not provided
+        if marker_cols is None:
+            gating = adata.uns.get("cell_cycle_gating", {}).get("latest", {})
+            stored = gating.get("marker_map", {})
+            if not stored:
+                raise ValueError(
+                    "marker_cols not provided and no stored cell_cycle_gating "
+                    "marker_map found in adata.uns. Run gate_cell_cycle first, "
+                    "or pass marker_cols explicitly."
+                )
+            marker_cols = dict(stored)
+
+        adata = _add_pt(
+            adata,
+            phase_col=phase_col,
+            marker_cols=marker_cols,
+            output_col=output_col,
+            angle_col=angle_col,
+            phase_order=phase_order,
+            phase_widths=phase_widths,
+            overwrite=overwrite,
+            copy=False,
+        )
+
+        self._adata = adata
+
+        if inplace:
+            self._try_save_inplace(adata)
+
+        self._log_run_event(
+            "cell_cycle_pseudotime",
+            {
+                "phase_col": phase_col,
+                "output_col": output_col,
+                "marker_cols": marker_cols,
+                "n_cells": int(adata.n_obs),
+            },
+        )
+
+        return adata
+
     def open_cell_cycle_app(self, port: int = 8502) -> "subprocess.Popen":
         """Launch the cell-cycle gating Streamlit app pre-loaded with this run.
 

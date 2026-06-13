@@ -9,6 +9,7 @@ Implements a transparent, rule-based exclusion hierarchy:
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -677,3 +678,679 @@ def gate_cell_cycle_by_group(
         "per_group_summary": per_group_summary,
         "per_group_thresholds": per_group_thresholds,
     }
+
+
+# ── Cell-cycle pseudotime ──────────────────────────────────────────────────────
+
+# Biological ordering of all recognised phase labels (superset).
+# Only phases actually present in the data are used; this list controls
+# their relative order on the pseudotime circle.
+DEFAULT_PSEUDOTIME_PHASE_ORDER: list[str] = [
+    "G0", "G0_or_quiescent",
+    "G1", "G1_or_quiescent", "early_G1",
+    "late_G1", "Cycling_G1",
+    "G1S",
+    "S", "S_phase",
+    "G2", "G2_phase",
+    "G2M",
+    "M", "M_phase",
+]
+
+# Within-phase scoring marker role(s) per phase label.
+# Biological rationale:
+#   G0/G1 phases — pRb increases as CDK4/6 phosphorylate Rb, preparing for S
+#   S phase      — DNA content increases through replication (not IdU intensity,
+#                  which identifies S cells but isn't monotone through S)
+#   G2 phase     — CyclinB1 accumulates before M entry
+#   G2/M         — average CyclinB1 and pH3 ranks
+#   M phase      — pH3 (H3-Ser28/Ser10) peaks during mitosis
+PHASE_SCORE_ROLES: dict[str, str | list[str]] = {
+    "G0":              "pRb",
+    "G0_or_quiescent": "pRb",
+    "G1":              "pRb",
+    "G1_or_quiescent": "pRb",
+    "early_G1":        "pRb",
+    "late_G1":         "pRb",
+    "Cycling_G1":      "pRb",
+    "G1S":             "pRb",
+    "S":               "DNA",
+    "S_phase":         "DNA",
+    "G2":              "CyclinB1",
+    "G2_phase":        "CyclinB1",
+    "G2M":             ["CyclinB1", "pH3"],
+    "M":               "pH3",
+    "M_phase":         "pH3",
+}
+
+# Fallback role priority for unknown phase labels
+_FALLBACK_ROLE_PRIORITY: list[str] = ["pRb", "DNA", "CyclinB1", "pH3", "IdU"]
+
+
+# ── Pseudotime helper functions ────────────────────────────────────────────────
+
+def _percentile_rank_0_1(values: np.ndarray) -> np.ndarray:
+    """Percentile ranks scaled to [0, 1), NaN-aware, average-tied.
+
+    - NaN inputs → NaN outputs (ignored when ranking).
+    - Single non-NaN cell → 0.5.
+    - Never returns exactly 1.0 (next phase starts at its own boundary).
+    """
+    values = np.asarray(values, dtype=float)
+    out = np.full(len(values), np.nan)
+    valid_mask = ~np.isnan(values)
+    valid_vals = values[valid_mask]
+    n = int(valid_mask.sum())
+
+    if n == 0:
+        return out
+    if n == 1:
+        out[valid_mask] = 0.5
+        return out
+
+    # Build 0-based rank via double-argsort
+    order = np.argsort(valid_vals, kind="stable")
+    rank = np.empty(n, dtype=float)
+    rank[order] = np.arange(n, dtype=float)
+
+    # Resolve ties: replace each tied group with its average rank
+    sorted_vals = valid_vals[order]
+    i = 0
+    while i < n:
+        j = i + 1
+        while j < n and sorted_vals[j] == sorted_vals[i]:
+            j += 1
+        avg = (i + j - 1) / 2.0
+        rank[order[i:j]] = avg
+        i = j
+
+    out[valid_mask] = rank / n  # maps to [0, (n-1)/n] ⊂ [0, 1)
+    return out
+
+
+def _get_marker_df(data: Any, marker_cols: dict[str, str]) -> pd.DataFrame:
+    """Extract marker columns from AnnData (obs → X) or DataFrame.
+
+    For AnnData, each column is looked up in ``adata.obs`` first, then in
+    ``adata.to_df()`` (expression matrix), so both obs metadata and marker
+    channels are supported transparently.
+    """
+    is_anndata = hasattr(data, "obs") and hasattr(data, "to_df")
+    result: dict[str, pd.Series] = {}
+
+    if is_anndata:
+        expr_df: pd.DataFrame | None = None
+        index = data.obs_names
+        for role, col in marker_cols.items():
+            if col in data.obs.columns:
+                result[role] = pd.to_numeric(data.obs[col], errors="coerce")
+            else:
+                if expr_df is None:
+                    expr_df = data.to_df()
+                if col in expr_df.columns:
+                    result[role] = pd.to_numeric(expr_df[col], errors="coerce")
+                else:
+                    warnings.warn(
+                        f"Marker column '{col}' (role '{role}') not found in "
+                        f"adata.obs or adata.X — skipping.",
+                        UserWarning, stacklevel=4,
+                    )
+    else:
+        index = data.index
+        for role, col in marker_cols.items():
+            if col in data.columns:
+                result[role] = pd.to_numeric(data[col], errors="coerce")
+            else:
+                warnings.warn(
+                    f"Marker column '{col}' (role '{role}') not found in "
+                    f"DataFrame — skipping.",
+                    UserWarning, stacklevel=4,
+                )
+
+    return pd.DataFrame(result, index=index)
+
+
+def _get_observed_phase_order(
+    phases: pd.Series,
+    phase_order: list[str] | None,
+) -> list[str]:
+    """Filter *phase_order* to phases present in the data.
+
+    Phases absent from the data are silently dropped. Phase labels present
+    in the data but missing from *phase_order* are appended at the end with
+    a ``UserWarning``. ``"Unclassified"`` is always excluded.
+    """
+    present = set(phases.dropna().astype(str).unique())
+    present.discard("Unclassified")
+
+    if phase_order is None:
+        phase_order = DEFAULT_PSEUDOTIME_PHASE_ORDER
+
+    ordered = [p for p in phase_order if p in present]
+    unknown = present - set(phase_order)
+    if unknown:
+        warnings.warn(
+            f"Phase label(s) not in the known phase_order: "
+            f"{sorted(unknown)}. Appending after known phases. "
+            "Pass a custom phase_order list to control their position.",
+            UserWarning, stacklevel=4,
+        )
+        ordered.extend(sorted(unknown))
+
+    return ordered
+
+
+def _get_phase_widths(
+    observed_phases: list[str],
+    phase_widths: dict[str, float] | None,
+) -> dict[str, float]:
+    """Return normalised fractional widths for each observed phase.
+
+    If *phase_widths* is ``None``, equal widths are assigned. Phases present
+    in the data but missing from *phase_widths* receive an equal share of the
+    remaining space (after summing provided widths). The result always sums
+    to 1.0 across *observed_phases*.
+    """
+    n = len(observed_phases)
+    if n == 0:
+        return {}
+
+    if phase_widths is None:
+        w = 1.0 / n
+        return {p: w for p in observed_phases}
+
+    provided = {p: float(phase_widths[p]) for p in observed_phases if p in phase_widths}
+    missing = [p for p in observed_phases if p not in provided]
+
+    if missing:
+        remaining = max(0.0, 1.0 - sum(provided.values()))
+        share = remaining / len(missing) if remaining > 0 else 1.0 / n
+        for p in missing:
+            provided[p] = share
+
+    total = sum(provided[p] for p in observed_phases)
+    if total <= 0:
+        total = 1.0
+    return {p: provided[p] / total for p in observed_phases}
+
+
+def _compute_within_phase_scores(
+    obs: pd.DataFrame,
+    markers: pd.DataFrame,
+    phase_col: str,
+    observed_phase_order: list[str],
+) -> tuple[pd.Series, pd.Series]:
+    """Compute within-phase [0, 1) score and integer phase index per cell.
+
+    Uses :data:`PHASE_SCORE_ROLES` to choose the ranking marker(s) for each
+    phase. Unknown phases fall back to the first available role in
+    :data:`_FALLBACK_ROLE_PRIORITY`.
+
+    Returns
+    -------
+    within_score : pd.Series of float in [0, 1), NaN for Unclassified cells
+    phase_idx    : pd.Series of int (0-based index into observed_phase_order,
+                   -1 for cells not in any observed phase)
+    """
+    within_score = pd.Series(np.nan, index=obs.index, dtype=float)
+    phase_idx = pd.Series(-1, index=obs.index, dtype=int)
+    phases = obs[phase_col].astype(str)
+
+    for idx, phase in enumerate(observed_phase_order):
+        mask = phases == phase
+        if not mask.any():
+            continue
+        phase_idx[mask] = idx
+
+        roles = PHASE_SCORE_ROLES.get(phase)
+
+        if roles is None:
+            # Unknown phase label — use first available fallback marker
+            roles = next(
+                (r for r in _FALLBACK_ROLE_PRIORITY if r in markers.columns),
+                None,
+            )
+            if roles is None:
+                within_score[mask] = 0.5
+                continue
+
+        if isinstance(roles, str):
+            roles = [roles]
+
+        score_arrays: list[np.ndarray] = []
+        for role in roles:
+            if role not in markers.columns:
+                warnings.warn(
+                    f"Marker role '{role}' needed for phase '{phase}' "
+                    f"within-phase scoring is not available — skipping.",
+                    UserWarning, stacklevel=5,
+                )
+                continue
+            vals = markers.loc[mask, role].values
+            score_arrays.append(_percentile_rank_0_1(vals))
+
+        if not score_arrays:
+            within_score[mask] = 0.5
+        elif len(score_arrays) == 1:
+            within_score[mask] = score_arrays[0]
+        else:
+            # Average the per-marker ranks (NaN-safe mean across markers)
+            stacked = np.vstack(score_arrays)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                within_score[mask] = np.nanmean(stacked, axis=0)
+
+    return within_score, phase_idx
+
+
+# ── Main pseudotime function ───────────────────────────────────────────────────
+
+def add_cell_cycle_pseudotime(
+    data: Any,
+    phase_col: str = "cell_cycle_phase",
+    marker_cols: dict[str, str] | None = None,
+    output_col: str = "cell_cycle_pseudotime",
+    angle_col: str = "cell_cycle_angle",
+    method: str = "rank_within_phase",
+    phase_order: list[str] | None = None,
+    phase_widths: dict[str, float] | None = None,
+    overwrite: bool = False,
+    copy: bool = True,
+) -> Any:
+    """Add a continuous cell-cycle pseudotime coordinate to gated CyTOF data.
+
+    Requires that cells already carry a categorical phase label produced by
+    :func:`gate_cell_cycle` (or equivalent). The phase labels are used as
+    anchors; this function adds only the continuous within-cycle position.
+
+    The pseudotime circle runs G0/G1 → S → G2 → M → back to G0/G1, encoded
+    as a value in **[0, 1)** (and as an angle in **[0, 2π)**).
+
+    Within each phase the ordering is determined by marker intensity ranks:
+
+    * **G0 / G1 phases** — ``pRb``: increases as CDK4/6 phosphorylate Rb
+    * **S phase** — ``DNA``: content increases through replication
+    * **G2 phase** — ``CyclinB1``: accumulates before M entry
+    * **G2/M** — average of ``CyclinB1`` and ``pH3`` ranks
+    * **M phase** — ``pH3``: peaks at mitosis
+
+    Args:
+        data: pandas DataFrame or AnnData. For AnnData, phase labels and
+            pseudotime output are stored in ``adata.obs``; marker values are
+            read from ``adata.obs`` first, then ``adata.X``.
+        phase_col: Column containing categorical cell-cycle phase labels.
+        marker_cols: Dict mapping role → actual column name, e.g.
+            ``{"DNA": "DNA1", "pRb": "pRb_S807"}``. Roles used for
+            within-phase ordering: ``pRb``, ``DNA``, ``CyclinB1``, ``pH3``,
+            ``IdU``. If ``None``, role names are used directly as column
+            names.
+        output_col: Name for the pseudotime output column.
+        angle_col: Name for the 2π-scaled angle output column.
+        method: Within-phase ordering method. Currently only
+            ``"rank_within_phase"`` is supported.
+        phase_order: Ordered list of phase labels (biological order G0→M).
+            Only labels present in the data are used. Unknown labels are
+            appended after known phases with a warning.
+        phase_widths: Dict mapping phase label → fractional arc width.
+            Normalised to sum to 1. Missing phases receive equal share of
+            the remainder. ``None`` → equal widths.
+        overwrite: If ``False`` (default), raise an error if the output
+            columns already exist.
+        copy: If ``True`` (default), return a modified copy. If ``False``,
+            modify in-place.
+
+    Returns:
+        Modified DataFrame or AnnData with four new columns:
+
+        * ``cell_cycle_pseudotime`` — continuous position in [0, 1)
+        * ``cell_cycle_angle`` — angle in [0, 2π)
+        * ``cell_cycle_phase_index`` — 0-based phase index (−1 for
+          Unclassified / unrecognised cells)
+        * ``cell_cycle_within_phase_rank`` — within-phase percentile rank
+
+        ``"Unclassified"`` cells receive ``NaN`` in all four columns.
+
+    Raises:
+        ValueError: If *phase_col* is not found.
+        ValueError: If output columns already exist and *overwrite* is False.
+        NotImplementedError: If an unsupported *method* is requested.
+
+    Example::
+
+        adata = add_cell_cycle_pseudotime(
+            adata,
+            phase_col="cell_cycle_phase",
+            marker_cols={"pRb": "pRb", "IdU": "IdU",
+                         "CyclinB1": "CyclinB1", "pH3": "pH3",
+                         "DNA": "DNA"},
+            overwrite=True,
+        )
+        plot_cell_cycle_pseudotime_markers(adata)
+        plot_cell_cycle_phase_circle(adata)
+    """
+    if method != "rank_within_phase":
+        raise NotImplementedError(
+            f"method='{method}' is not supported. "
+            "Only 'rank_within_phase' is currently implemented."
+        )
+
+    is_anndata = hasattr(data, "obs") and hasattr(data, "to_df")
+
+    if copy:
+        data = data.copy()
+
+    obs: pd.DataFrame = data.obs if is_anndata else data
+
+    if phase_col not in obs.columns:
+        raise ValueError(
+            f"Phase column '{phase_col}' not found. "
+            f"Available columns: {list(obs.columns[:15])}"
+        )
+
+    # Guard against overwriting existing results
+    out_cols = [output_col, angle_col, "cell_cycle_phase_index",
+                "cell_cycle_within_phase_rank"]
+    existing = [c for c in out_cols if c in obs.columns]
+    if existing and not overwrite:
+        raise ValueError(
+            f"Output columns already exist: {existing}. "
+            "Pass overwrite=True to replace them."
+        )
+
+    if marker_cols is None:
+        marker_cols = {r: r for r in ["pRb", "IdU", "CyclinB1", "pH3", "DNA"]}
+
+    markers = _get_marker_df(data, marker_cols)
+
+    phases = obs[phase_col].astype(str)
+    observed_phases = _get_observed_phase_order(phases, phase_order)
+
+    if not observed_phases:
+        raise ValueError(
+            f"No recognised phase labels found in '{phase_col}'. "
+            f"Unique values present: {list(phases.unique())}"
+        )
+
+    widths = _get_phase_widths(observed_phases, phase_widths)
+
+    # Compute cumulative start position for each phase
+    phase_starts: dict[str, float] = {}
+    cumulative = 0.0
+    for p in observed_phases:
+        phase_starts[p] = cumulative
+        cumulative += widths[p]
+
+    within_score, phase_idx = _compute_within_phase_scores(
+        obs, markers, phase_col, observed_phases
+    )
+
+    # pseudotime = phase_start + within_rank * phase_width
+    pseudotime = pd.Series(np.nan, index=obs.index, dtype=float)
+    for phase in observed_phases:
+        mask = phases == phase
+        if not mask.any():
+            continue
+        pseudotime[mask] = phase_starts[phase] + within_score[mask] * widths[phase]
+
+    # Clamp to [0, 1) via modulo (handles any floating-point drift)
+    valid = pseudotime.notna()
+    pseudotime[valid] = pseudotime[valid] % 1.0
+
+    angle = 2.0 * np.pi * pseudotime
+
+    if is_anndata:
+        data.obs[output_col] = pseudotime.values
+        data.obs[angle_col] = angle.values
+        data.obs["cell_cycle_phase_index"] = phase_idx.values
+        data.obs["cell_cycle_within_phase_rank"] = within_score.values
+    else:
+        data[output_col] = pseudotime.values
+        data[angle_col] = angle.values
+        data["cell_cycle_phase_index"] = phase_idx.values
+        data["cell_cycle_within_phase_rank"] = within_score.values
+
+    return data
+
+
+# ── Pseudotime validation plots ────────────────────────────────────────────────
+
+def plot_cell_cycle_pseudotime_markers(
+    data: Any,
+    pseudotime_col: str = "cell_cycle_pseudotime",
+    phase_col: str = "cell_cycle_phase",
+    marker_cols: list[str] | dict[str, str] | None = None,
+    bins: int = 50,
+    use_hexbin: bool = True,
+    figsize_per_marker: tuple[float, float] = (5, 3),
+) -> "plt.Figure":
+    """Plot marker intensity vs cell-cycle pseudotime for validation.
+
+    Each marker gets a row. With ``use_hexbin=True`` (default), a density
+    hexbin is drawn; with ``use_hexbin=False``, cells are coloured by their
+    gated phase. A binned mean trend line is overlaid in both cases. Vertical
+    dashed lines mark the start of each phase.
+
+    Expected biological patterns:
+
+    * **pRb**: rises before S phase
+    * **IdU**: high in S phase only
+    * **DNA**: increases through S, stays high in G2/M
+    * **CyclinB1**: accumulates in G2
+    * **pH3**: peaks in M
+
+    Args:
+        data: pandas DataFrame or AnnData.
+        pseudotime_col: Column with pseudotime values (from
+            :func:`add_cell_cycle_pseudotime`).
+        phase_col: Column with categorical phase labels.
+        marker_cols: Markers to plot. List of column names, dict of
+            role → column, or ``None`` to use
+            ``["pRb", "IdU", "DNA", "CyclinB1", "pH3"]``.
+        bins: Number of hexbin / trend-line bins along the pseudotime axis.
+        use_hexbin: If ``True``, plot density hexbin. If ``False``, plot
+            phase-coloured scatter.
+        figsize_per_marker: ``(width, height)`` for each marker row.
+
+    Returns:
+        matplotlib Figure with one row per marker.
+    """
+    is_anndata = hasattr(data, "obs") and hasattr(data, "to_df")
+    obs: pd.DataFrame = data.obs.copy() if is_anndata else data.copy()
+    expr_df: pd.DataFrame | None = None
+
+    if pseudotime_col not in obs.columns:
+        raise ValueError(
+            f"Column '{pseudotime_col}' not found. "
+            "Run add_cell_cycle_pseudotime first."
+        )
+
+    if marker_cols is None:
+        marker_cols = ["pRb", "IdU", "DNA", "CyclinB1", "pH3"]
+
+    if isinstance(marker_cols, dict):
+        col_list = list(marker_cols.values())
+    else:
+        col_list = list(marker_cols)
+
+    # Resolve columns — obs first, then expression matrix
+    resolved: list[str] = []
+    for col in col_list:
+        if col in obs.columns:
+            resolved.append(col)
+        else:
+            if is_anndata and expr_df is None:
+                expr_df = data.to_df()
+            if expr_df is not None and col in expr_df.columns:
+                obs[col] = expr_df[col].values
+                resolved.append(col)
+            else:
+                warnings.warn(
+                    f"Marker column '{col}' not found — skipping.",
+                    UserWarning, stacklevel=2,
+                )
+
+    if not resolved:
+        raise ValueError("No marker columns available to plot.")
+
+    pt = pd.to_numeric(obs[pseudotime_col], errors="coerce").values
+    has_phase = phase_col in obs.columns
+    phases_arr = obs[phase_col].values if has_phase else None
+
+    n_markers = len(resolved)
+    fig, axes = plt.subplots(
+        n_markers, 1,
+        figsize=(figsize_per_marker[0], figsize_per_marker[1] * n_markers),
+        squeeze=False,
+    )
+
+    for ax_row, col in zip(axes, resolved):
+        ax = ax_row[0]
+        vals = pd.to_numeric(obs[col], errors="coerce").values
+        valid = ~np.isnan(pt) & ~np.isnan(vals)
+        pt_v, vals_v = pt[valid], vals[valid]
+
+        if use_hexbin:
+            hb = ax.hexbin(pt_v, vals_v, gridsize=bins, cmap="Blues",
+                           mincnt=1, linewidths=0.1)
+            fig.colorbar(hb, ax=ax, pad=0.01, fraction=0.03, label="cells")
+        else:
+            # Phase-coloured scatter
+            if phases_arr is not None:
+                ph_v = phases_arr[valid]
+                for phase in PHASE_ORDER:
+                    ph_mask = ph_v == phase
+                    if not ph_mask.any():
+                        continue
+                    ax.scatter(
+                        pt_v[ph_mask], vals_v[ph_mask],
+                        c=PHASE_COLORS.get(phase, "#aaaaaa"),
+                        s=2, alpha=0.4, linewidths=0, rasterized=True,
+                        label=phase.replace("_", " "),
+                    )
+            else:
+                ax.scatter(pt_v, vals_v, s=2, alpha=0.3,
+                           color="#4a90d9", rasterized=True)
+
+        # Binned mean trend line
+        bin_edges = np.linspace(0, 1, bins + 1)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+        bin_means = np.array([
+            np.nanmean(vals_v[(pt_v >= lo) & (pt_v < hi)])
+            if ((pt_v >= lo) & (pt_v < hi)).sum() >= 3 else np.nan
+            for lo, hi in zip(bin_edges[:-1], bin_edges[1:])
+        ])
+        ok = ~np.isnan(bin_means)
+        if ok.sum() > 1:
+            ax.plot(bin_centers[ok], bin_means[ok],
+                    color="#d62728", lw=2.0, zorder=6, label="mean")
+
+        # Phase boundary lines
+        if has_phase:
+            for phase in PHASE_ORDER:
+                ph_mask = (phases_arr[valid] == phase)
+                if not ph_mask.any():
+                    continue
+                start = np.nanmin(pt_v[ph_mask])
+                color = PHASE_COLORS.get(phase, "#888888")
+                ax.axvline(start, color=color, lw=1.0, ls="--", alpha=0.7)
+                ax.text(start + 0.005, ax.get_ylim()[1],
+                        phase.replace("_or_", "\n").replace("_", " "),
+                        fontsize=6, va="top", color=color, alpha=0.85)
+
+        ax.set_xlim(0, 1)
+        ax.set_ylabel(col, fontsize=9)
+        ax.set_xlabel("Cell-cycle pseudotime", fontsize=9)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    fig.suptitle("Marker dynamics along cell-cycle pseudotime",
+                 fontsize=11, y=1.01)
+    fig.tight_layout()
+    return fig
+
+
+def plot_cell_cycle_phase_circle(
+    data: Any,
+    angle_col: str = "cell_cycle_angle",
+    phase_col: str = "cell_cycle_phase",
+    n_subsample: int = 5000,
+    seed: int = 42,
+) -> "plt.Figure":
+    """Polar scatter plot of cell positions on the cell-cycle circle.
+
+    Each cell is placed at its cell-cycle angle. The radial axis is jittered
+    for visibility. Intended as a quick sanity check that cells are
+    distributed reasonably around the cycle and that phase colours match
+    expectations.
+
+    Args:
+        data: pandas DataFrame or AnnData.
+        angle_col: Column containing cell-cycle angle in [0, 2π)
+            (from :func:`add_cell_cycle_pseudotime`).
+        phase_col: Column with categorical phase labels.
+        n_subsample: Maximum cells to plot (random subsample).
+        seed: Random seed for reproducible subsampling.
+
+    Returns:
+        matplotlib Figure with a single polar axis.
+    """
+    is_anndata = hasattr(data, "obs") and hasattr(data, "to_df")
+    obs: pd.DataFrame = data.obs if is_anndata else data
+
+    if angle_col not in obs.columns:
+        raise ValueError(
+            f"Angle column '{angle_col}' not found. "
+            "Run add_cell_cycle_pseudotime first."
+        )
+
+    angles = pd.to_numeric(obs[angle_col], errors="coerce")
+    valid = ~angles.isna()
+    angles_v = angles[valid].values
+    phases_v = obs.loc[valid, phase_col].values if phase_col in obs.columns else None
+
+    rng = np.random.default_rng(seed)
+    n = len(angles_v)
+    if n > n_subsample:
+        idx = rng.choice(n, n_subsample, replace=False)
+        angles_v = angles_v[idx]
+        if phases_v is not None:
+            phases_v = phases_v[idx]
+
+    fig, ax = plt.subplots(figsize=(5.5, 5.5), subplot_kw={"projection": "polar"})
+
+    # Jitter radius so overlapping points are visible
+    r = rng.uniform(0.4, 1.0, len(angles_v))
+
+    if phases_v is not None:
+        for phase in PHASE_ORDER:
+            mask = phases_v == phase
+            if not mask.any():
+                continue
+            ax.scatter(
+                angles_v[mask], r[mask],
+                c=PHASE_COLORS.get(phase, "#aaaaaa"),
+                s=3, alpha=0.5, linewidths=0, rasterized=True,
+                label=phase.replace("_", " "),
+            )
+    else:
+        ax.scatter(angles_v, r, s=3, alpha=0.5,
+                   color="#4a90d9", linewidths=0, rasterized=True)
+
+    # Orient so G0/G1 starts at top, cycle runs clockwise
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    ax.set_rlim(0, 1.3)
+    ax.set_rticks([])
+    ax.set_title("Cell-cycle pseudotime", fontsize=11, pad=15)
+
+    if phases_v is not None:
+        handles = [
+            plt.Line2D([0], [0], marker="o", color="w", markersize=8,
+                       markerfacecolor=PHASE_COLORS.get(p, "#aaaaaa"),
+                       label=p.replace("_", " "))
+            for p in PHASE_ORDER if (phases_v == p).any()
+        ]
+        ax.legend(handles=handles, bbox_to_anchor=(1.35, 1.0),
+                  loc="upper left", fontsize=8, framealpha=0.8)
+
+    fig.tight_layout()
+    return fig

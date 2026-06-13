@@ -4,6 +4,23 @@
 
 Storage utilities for cytofstandard.
 
+## Public Exports (`__all__`)
+
+- `compute_sha256`
+- `compute_file_hashes`
+- `read_yaml`
+- `write_yaml`
+- `read_parquet`
+- `write_parquet`
+- `ensure_directory`
+- `get_directory_size`
+- `copy_file`
+- `file_exists`
+- `directory_exists`
+- `copy_files_to_directory`
+- `set_zarr_parts_writable`
+- `get_locked_zarr_parts`
+
 ## Top-level Functions
 
 ### `compute_file_hashes(file_paths: list[str]) -> dict[str, str]`
@@ -82,6 +99,22 @@ Args:
     
 Returns:
     Total size in bytes
+
+### `get_locked_zarr_parts(zarr_root: str | Path) -> list[str]`
+
+Return logical zarr parts that contain any read-only files.
+
+Scans the top-level directories of the zarr store (and one level deeper
+inside ``layers/`` to expose individual layer names) and returns those
+whose file trees contain at least one file without owner-write permission.
+
+Args:
+    zarr_root: Root directory of the Zarr store.
+
+Returns:
+    Sorted list of locked part paths (e.g. ``["layers/raw", "obs"]``).
+    An empty list means the store is fully writable.
+    ``["."]`` means the entire store is locked.
 
 ### `read_parquet(file_path: str) -> pd.DataFrame`
 
