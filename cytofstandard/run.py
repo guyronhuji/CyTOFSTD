@@ -581,11 +581,14 @@ class Run:
         self._adata = adata
         self._update_marker_variables(adata)
 
-    def read_adata(self, backed: bool = False):
+    def read_adata(self, backed: bool = False, force: bool = False):
         """Read the ingested AnnData object.
 
         Args:
             backed: Whether to use backed mode (currently ignored)
+            force: Re-read from disk even if an in-memory copy is cached.
+                Use this after external modifications (e.g. gating via the
+                Streamlit app) to pick up changes written by another process.
 
         Returns:
             AnnData object
@@ -601,7 +604,7 @@ class Run:
                 f"{zarr_path}\n\nCall run.ingest(...) first."
             )
 
-        if self._adata is None:
+        if self._adata is None or force:
             import anndata
 
             self._adata = anndata.read_zarr(zarr_path)
