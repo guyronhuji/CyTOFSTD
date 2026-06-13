@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-13T17:07:56.115501+00:00",
+  "generated_at": "2026-06-13T17:50:25.138492+00:00",
   "generator": "scripts/generate_api_docs.py",
   "package": "cytofstandard",
   "module_count": 15,
@@ -35,7 +35,7 @@
       "functions": [
         {
           "name": "add_cell_cycle_pseudotime",
-          "signature": "(data: Any, phase_col: str = 'cell_cycle_phase', marker_cols: dict[str, str] | None = None, output_col: str = 'cell_cycle_pseudotime', angle_col: str = 'cell_cycle_angle', method: str = 'rank_within_phase', phase_order: list[str] | None = None, phase_widths: dict[str, float] | None = None, overwrite: bool = False, copy: bool = True) -> Any",
+          "signature": "(data: Any, phase_col: str = 'cell_cycle_phase', marker_cols: dict[str, str] | None = None, output_col: str = 'cell_cycle_pseudotime', angle_col: str = 'cell_cycle_angle', on_cycle_col: str = 'cell_cycle_on_cycle', method: str = 'rank_within_phase', phase_order: list[str] | None = None, phase_widths: dict[str, float] | None = None, overwrite: bool = False, copy: bool = True) -> Any",
           "summary": "Add a continuous cell-cycle pseudotime coordinate to gated CyTOF data.",
           "decorators": []
         },
@@ -101,7 +101,7 @@
         },
         {
           "name": "plot_cell_cycle_pseudotime_markers",
-          "signature": "(data: Any, pseudotime_col: str = 'cell_cycle_pseudotime', phase_col: str = 'cell_cycle_phase', marker_cols: list[str] | dict[str, str] | None = None, bins: int = 50, use_hexbin: bool = True, figsize_per_marker: tuple[float, float] = (5, 3)) -> 'plt.Figure'",
+          "signature": "(data: Any, pseudotime_col: str = 'cell_cycle_pseudotime', phase_col: str = 'cell_cycle_phase', on_cycle_col: str = 'cell_cycle_on_cycle', marker_cols: list[str] | dict[str, str] | None = None, group_col: str | None = None, group_order: list[str] | None = None, group_palette: list[str] | dict[str, str] | None = None, show_sem: bool = True, bins: int = 50, use_hexbin: bool = True, n_cols: int = 1, figsize_per_marker: tuple[float, float] = (5, 3)) -> 'plt.Figure'",
           "summary": "Plot marker intensity vs cell-cycle pseudotime for validation.",
           "decorators": []
         },
@@ -556,7 +556,7 @@
           "methods": [
             {
               "name": "add_cell_cycle_pseudotime",
-              "signature": "(self, marker_cols: dict[str, str] | None = None, phase_col: str = 'cell_cycle_phase', output_col: str = 'cell_cycle_pseudotime', angle_col: str = 'cell_cycle_angle', phase_order: list[str] | None = None, phase_widths: dict[str, float] | None = None, overwrite: bool = False, inplace: bool = True) -> 'anndata.AnnData'",
+              "signature": "(self, marker_cols: dict[str, str] | None = None, phase_col: str = 'cell_cycle_phase', output_col: str = 'cell_cycle_pseudotime', angle_col: str = 'cell_cycle_angle', on_cycle_col: str = 'cell_cycle_on_cycle', phase_order: list[str] | None = None, phase_widths: dict[str, float] | None = None, overwrite: bool = False, inplace: bool = True) -> 'anndata.AnnData'",
               "summary": "Add a continuous cell-cycle pseudotime coordinate to this run.",
               "decorators": []
             },

@@ -12,7 +12,7 @@ Implements a transparent, rule-based exclusion hierarchy:
 
 ## Top-level Functions
 
-### `add_cell_cycle_pseudotime(data: Any, phase_col: str = 'cell_cycle_phase', marker_cols: dict[str, str] | None = None, output_col: str = 'cell_cycle_pseudotime', angle_col: str = 'cell_cycle_angle', method: str = 'rank_within_phase', phase_order: list[str] | None = None, phase_widths: dict[str, float] | None = None, overwrite: bool = False, copy: bool = True) -> Any`
+### `add_cell_cycle_pseudotime(data: Any, phase_col: str = 'cell_cycle_phase', marker_cols: dict[str, str] | None = None, output_col: str = 'cell_cycle_pseudotime', angle_col: str = 'cell_cycle_angle', on_cycle_col: str = 'cell_cycle_on_cycle', method: str = 'rank_within_phase', phase_order: list[str] | None = None, phase_widths: dict[str, float] | None = None, overwrite: bool = False, copy: bool = True) -> Any`
 
 Add a continuous cell-cycle pseudotime coordinate to gated CyTOF data.
 
@@ -20,12 +20,18 @@ Requires that cells already carry a categorical phase label produced by
 :func:`gate_cell_cycle` (or equivalent). The phase labels are used as
 anchors; this function adds only the continuous within-cycle position.
 
-The pseudotime circle runs G0/G1 → S → G2 → M → back to G0/G1, encoded
+**G0/quiescent cells are excluded from the cyclic coordinate.** They
+receive ``cell_cycle_on_cycle = False`` and ``NaN`` in all pseudotime
+columns. Only proliferating cells (G1 → S → G2 → M) are placed on the
+circle.  The G0 fraction can be compared across samples independently:
+``(adata.obs[on_cycle_col] == False).mean()``.
+
+The pseudotime circle runs G1 → S → G2 → M → back to G1, encoded
 as a value in **[0, 1)** (and as an angle in **[0, 2π)**).
 
 Within each phase the ordering is determined by marker intensity ranks:
 
-* **G0 / G1 phases** — ``pRb``: increases as CDK4/6 phosphorylate Rb
+* **G1 phases** — ``pRb``: increases as CDK4/6 phosphorylate Rb
 * **S phase** — ``DNA``: content increases through replication
 * **G2 phase** — ``CyclinB1``: accumulates before M entry
 * **G2/M** — average of ``CyclinB1`` and ``pH3`` ranks
@@ -43,11 +49,14 @@ Args:
         names.
     output_col: Name for the pseudotime output column.
     angle_col: Name for the 2π-scaled angle output column.
+    on_cycle_col: Name for the boolean on-cycle flag column.
+        ``True`` for G1/S/G2/M cells, ``False`` for G0/quiescent cells.
     method: Within-phase ordering method. Currently only
         ``"rank_within_phase"`` is supported.
-    phase_order: Ordered list of phase labels (biological order G0→M).
-        Only labels present in the data are used. Unknown labels are
-        appended after known phases with a warning.
+    phase_order: Ordered list of **cycling** phase labels (biological
+        order G1→M). G0 labels are always excluded regardless of this
+        list. Unknown labels are appended after known phases with a
+        warning.
     phase_widths: Dict mapping phase label → fractional arc width.
         Normalised to sum to 1. Missing phases receive equal share of
         the remainder. ``None`` → equal widths.
@@ -57,15 +66,15 @@ Args:
         modify in-place.
 
 Returns:
-    Modified DataFrame or AnnData with four new columns:
+    Modified DataFrame or AnnData with five new columns:
 
-    * ``cell_cycle_pseudotime`` — continuous position in [0, 1)
-    * ``cell_cycle_angle`` — angle in [0, 2π)
+    * ``cell_cycle_pseudotime`` — continuous position in [0, 1); NaN for
+      G0/quiescent and Unclassified cells
+    * ``cell_cycle_angle`` — angle in [0, 2π); NaN for off-cycle cells
     * ``cell_cycle_phase_index`` — 0-based phase index (−1 for
-      Unclassified / unrecognised cells)
+      off-cycle / Unclassified cells)
     * ``cell_cycle_within_phase_rank`` — within-phase percentile rank
-
-    ``"Unclassified"`` cells receive ``NaN`` in all four columns.
+    * ``cell_cycle_on_cycle`` — bool; False for G0/quiescent cells
 
 Raises:
     ValueError: If *phase_col* is not found.
@@ -238,14 +247,17 @@ Returns:
 
 Bar chart of cell-cycle phase fractions.
 
-### `plot_cell_cycle_pseudotime_markers(data: Any, pseudotime_col: str = 'cell_cycle_pseudotime', phase_col: str = 'cell_cycle_phase', marker_cols: list[str] | dict[str, str] | None = None, bins: int = 50, use_hexbin: bool = True, figsize_per_marker: tuple[float, float] = (5, 3)) -> 'plt.Figure'`
+### `plot_cell_cycle_pseudotime_markers(data: Any, pseudotime_col: str = 'cell_cycle_pseudotime', phase_col: str = 'cell_cycle_phase', on_cycle_col: str = 'cell_cycle_on_cycle', marker_cols: list[str] | dict[str, str] | None = None, group_col: str | None = None, group_order: list[str] | None = None, group_palette: list[str] | dict[str, str] | None = None, show_sem: bool = True, bins: int = 50, use_hexbin: bool = True, n_cols: int = 1, figsize_per_marker: tuple[float, float] = (5, 3)) -> 'plt.Figure'`
 
 Plot marker intensity vs cell-cycle pseudotime for validation.
 
-Each marker gets a row. With ``use_hexbin=True`` (default), a density
-hexbin is drawn; with ``use_hexbin=False``, cells are coloured by their
-gated phase. A binned mean trend line is overlaid in both cases. Vertical
-dashed lines mark the start of each phase.
+Each marker gets one panel in a grid. When ``group_col`` is provided,
+one binned mean trend line is drawn per group, with optional ±1 SEM
+shading — useful for comparing trajectories across conditions or samples.
+Without ``group_col``, a density hexbin is shown with a single mean line.
+
+Only cycling cells (``cell_cycle_on_cycle == True``) are included,
+so G0/quiescent cells do not distort the trend lines.
 
 Expected biological patterns:
 
@@ -260,16 +272,29 @@ Args:
     pseudotime_col: Column with pseudotime values (from
         :func:`add_cell_cycle_pseudotime`).
     phase_col: Column with categorical phase labels.
+    on_cycle_col: Boolean column marking cycling cells (G0 = False).
+        If present, only ``True`` cells are plotted.
     marker_cols: Markers to plot. List of column names, dict of
         role → column, or ``None`` to use
         ``["pRb", "IdU", "DNA", "CyclinB1", "pH3"]``.
-    bins: Number of hexbin / trend-line bins along the pseudotime axis.
-    use_hexbin: If ``True``, plot density hexbin. If ``False``, plot
-        phase-coloured scatter.
-    figsize_per_marker: ``(width, height)`` for each marker row.
+    group_col: Column used to split cells into groups (e.g.
+        ``"sample"``, ``"condition"``). When provided, one trend line
+        per group is drawn instead of a single mean line. The hexbin
+        background is suppressed in group mode.
+    group_order: Ordered list of group labels to display. Labels not
+        in this list are silently dropped. ``None`` uses sorted order.
+    group_palette: Colors for groups. A list is mapped to groups in
+        order; a dict maps label → color. ``None`` uses ``tab10``.
+    show_sem: If ``True`` (default), shade ±1 SEM around each group
+        trend line. Ignored when ``group_col`` is ``None``.
+    bins: Number of bins along the pseudotime axis.
+    use_hexbin: If ``True`` (default), plot density hexbin in single-
+        group mode. Ignored when ``group_col`` is provided.
+    n_cols: Number of columns in the marker grid.
+    figsize_per_marker: ``(width, height)`` for each marker panel.
 
 Returns:
-    matplotlib Figure with one row per marker.
+    matplotlib Figure with one panel per marker arranged in a grid.
 
 ### `plot_marker_thresholds(df: pd.DataFrame, marker_map: dict[str, str], thresholds: dict[str, float] | None = None, n_bins: int = 80, figsize: tuple[float, float] | None = None) -> list`
 
