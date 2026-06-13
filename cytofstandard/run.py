@@ -5844,6 +5844,7 @@ class Run:
         phase_col: str = "cell_cycle_phase",
         output_col: str = "cell_cycle_pseudotime",
         angle_col: str = "cell_cycle_angle",
+        on_cycle_col: str = "cell_cycle_on_cycle",
         phase_order: list[str] | None = None,
         phase_widths: dict[str, float] | None = None,
         overwrite: bool = False,
@@ -5872,6 +5873,8 @@ class Run:
             phase_col: Column in ``adata.obs`` with categorical phase labels.
             output_col: Output column name for pseudotime.
             angle_col: Output column name for the 2π angle.
+            on_cycle_col: Output column for the boolean on-cycle flag
+                (``True`` for G1/S/G2/M, ``False`` for G0/quiescent).
             phase_order: Custom biological ordering of phase labels.
             phase_widths: Dict of phase → fractional arc width (summed to 1).
             overwrite: Overwrite existing pseudotime columns. Default False.
@@ -5916,6 +5919,7 @@ class Run:
             marker_cols=marker_cols,
             output_col=output_col,
             angle_col=angle_col,
+            on_cycle_col=on_cycle_col,
             phase_order=phase_order,
             phase_widths=phase_widths,
             overwrite=overwrite,
