@@ -1170,6 +1170,10 @@ def plot_cell_cycle_pseudotime_markers(
     phase_col: str = "cell_cycle_phase",
     on_cycle_col: str = "cell_cycle_on_cycle",
     marker_cols: list[str] | dict[str, str] | None = None,
+    group_col: str | None = None,
+    group_order: list[str] | None = None,
+    group_palette: list[str] | dict[str, str] | None = None,
+    show_sem: bool = True,
     bins: int = 50,
     use_hexbin: bool = True,
     n_cols: int = 1,
@@ -1177,13 +1181,13 @@ def plot_cell_cycle_pseudotime_markers(
 ) -> "plt.Figure":
     """Plot marker intensity vs cell-cycle pseudotime for validation.
 
-    Each marker gets one panel in a grid. With ``use_hexbin=True`` (default),
-    a density hexbin is drawn; with ``use_hexbin=False``, cells are coloured
-    by their gated phase. A binned mean trend line is overlaid in both cases.
-    Vertical dashed lines mark the start of each phase.
+    Each marker gets one panel in a grid. When ``group_col`` is provided,
+    one binned mean trend line is drawn per group, with optional ±1 SEM
+    shading — useful for comparing trajectories across conditions or samples.
+    Without ``group_col``, a density hexbin is shown with a single mean line.
 
-    Only cycling cells (``cell_cycle_on_cycle == True``) are included by
-    default, so G0/quiescent cells do not distort the trend lines.
+    Only cycling cells (``cell_cycle_on_cycle == True``) are included,
+    so G0/quiescent cells do not distort the trend lines.
 
     Expected biological patterns:
 
@@ -1203,9 +1207,19 @@ def plot_cell_cycle_pseudotime_markers(
         marker_cols: Markers to plot. List of column names, dict of
             role → column, or ``None`` to use
             ``["pRb", "IdU", "DNA", "CyclinB1", "pH3"]``.
-        bins: Number of hexbin / trend-line bins along the pseudotime axis.
-        use_hexbin: If ``True``, plot density hexbin. If ``False``, plot
-            phase-coloured scatter.
+        group_col: Column used to split cells into groups (e.g.
+            ``"sample"``, ``"condition"``). When provided, one trend line
+            per group is drawn instead of a single mean line. The hexbin
+            background is suppressed in group mode.
+        group_order: Ordered list of group labels to display. Labels not
+            in this list are silently dropped. ``None`` uses sorted order.
+        group_palette: Colors for groups. A list is mapped to groups in
+            order; a dict maps label → color. ``None`` uses ``tab10``.
+        show_sem: If ``True`` (default), shade ±1 SEM around each group
+            trend line. Ignored when ``group_col`` is ``None``.
+        bins: Number of bins along the pseudotime axis.
+        use_hexbin: If ``True`` (default), plot density hexbin in single-
+            group mode. Ignored when ``group_col`` is provided.
         n_cols: Number of columns in the marker grid.
         figsize_per_marker: ``(width, height)`` for each marker panel.
 
@@ -1262,6 +1276,42 @@ def plot_cell_cycle_pseudotime_markers(
     has_phase = phase_col in obs.columns
     phases_arr = obs[phase_col].values if has_phase else None
 
+    # Resolve groups
+    if group_col is not None and group_col not in obs.columns:
+        warnings.warn(
+            f"group_col '{group_col}' not found — plotting without groups.",
+            UserWarning, stacklevel=2,
+        )
+        group_col = None
+
+    if group_col is not None:
+        groups_raw = obs[group_col].astype(str).values
+        all_labels = sorted(set(groups_raw[cycling_mask & ~np.isnan(pt_all)]))
+        if group_order is not None:
+            groups_list = [g for g in group_order if g in set(all_labels)]
+        else:
+            groups_list = all_labels
+
+        # Build color map
+        cmap_tab10 = plt.get_cmap("tab10")
+        if group_palette is None:
+            group_colors: dict[str, str] = {
+                g: cmap_tab10(k % 10) for k, g in enumerate(groups_list)
+            }
+        elif isinstance(group_palette, dict):
+            group_colors = {g: group_palette.get(g, cmap_tab10(k % 10))
+                            for k, g in enumerate(groups_list)}
+        else:
+            group_colors = {g: group_palette[k % len(group_palette)]
+                            for k, g in enumerate(groups_list)}
+    else:
+        groups_list = []
+        groups_raw = None
+        group_colors = {}
+
+    bin_edges = np.linspace(0, 1, bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+
     n_markers = len(resolved)
     n_cols = max(1, int(n_cols))
     n_rows = math.ceil(n_markers / n_cols)
@@ -1276,50 +1326,95 @@ def plot_cell_cycle_pseudotime_markers(
         ax = axes[i // n_cols][i % n_cols]
         vals_all = pd.to_numeric(obs[col], errors="coerce").values
 
-        # Only plot cycling cells with valid pseudotime
+        # Only cycling cells with valid pseudotime and marker value
         valid = cycling_mask & ~np.isnan(pt_all) & ~np.isnan(vals_all)
-        pt_v, vals_v = pt_all[valid], vals_all[valid]
+        pt_v = pt_all[valid]
+        vals_v = vals_all[valid]
 
-        if use_hexbin:
-            hb = ax.hexbin(pt_v, vals_v, gridsize=bins, cmap="Blues",
-                           mincnt=1, linewidths=0.1)
-            fig.colorbar(hb, ax=ax, pad=0.01, fraction=0.03, label="cells")
+        if group_col is not None:
+            # ── Group comparison mode ──────────────────────────────────────
+            grp_v = groups_raw[valid]
+
+            # Faint grey hexbin of all cycling cells as background context
+            ax.hexbin(pt_v, vals_v, gridsize=bins, cmap="Greys",
+                      mincnt=1, linewidths=0, alpha=0.25, zorder=1)
+
+            for grp in groups_list:
+                gm = grp_v == grp
+                if gm.sum() < 3:
+                    continue
+                pt_g, vals_g = pt_v[gm], vals_v[gm]
+                color = group_colors[grp]
+
+                bin_means = np.array([
+                    np.nanmean(vals_g[(pt_g >= lo) & (pt_g < hi)])
+                    if ((pt_g >= lo) & (pt_g < hi)).sum() >= 3 else np.nan
+                    for lo, hi in zip(bin_edges[:-1], bin_edges[1:])
+                ])
+
+                if show_sem:
+                    bin_sems = np.array([
+                        np.nanstd(vals_g[(pt_g >= lo) & (pt_g < hi)], ddof=1)
+                        / np.sqrt(((pt_g >= lo) & (pt_g < hi)).sum())
+                        if ((pt_g >= lo) & (pt_g < hi)).sum() >= 3 else np.nan
+                        for lo, hi in zip(bin_edges[:-1], bin_edges[1:])
+                    ])
+
+                ok = ~np.isnan(bin_means)
+                if ok.sum() < 2:
+                    continue
+                ax.plot(bin_centers[ok], bin_means[ok],
+                        color=color, lw=2.0, zorder=5, label=str(grp))
+                if show_sem:
+                    lo_band = bin_means[ok] - bin_sems[ok]
+                    hi_band = bin_means[ok] + bin_sems[ok]
+                    ax.fill_between(bin_centers[ok], lo_band, hi_band,
+                                    color=color, alpha=0.15, zorder=4)
+
+            # Legend only on first panel to avoid repetition
+            if i == 0:
+                ax.legend(fontsize=8, framealpha=0.8,
+                          title=group_col, title_fontsize=8)
+
         else:
-            # Phase-coloured scatter
-            if phases_arr is not None:
-                ph_v = np.asarray(phases_arr[valid], dtype=str)
-                present_phases = sorted(
-                    {p for p in ph_v if p not in ("Unclassified", "nan")},
-                    key=lambda p: PHASE_ORDER.index(p) if p in PHASE_ORDER else len(PHASE_ORDER),
-                )
-                for phase in present_phases:
-                    ph_mask = ph_v == phase
-                    if not ph_mask.any():
-                        continue
-                    ax.scatter(
-                        pt_v[ph_mask], vals_v[ph_mask],
-                        c=PHASE_COLORS.get(phase, "#aaaaaa"),
-                        s=2, alpha=0.4, linewidths=0, rasterized=True,
-                        label=phase.replace("_", " "),
-                    )
+            # ── Single-group mode ──────────────────────────────────────────
+            if use_hexbin:
+                hb = ax.hexbin(pt_v, vals_v, gridsize=bins, cmap="Blues",
+                               mincnt=1, linewidths=0.1)
+                fig.colorbar(hb, ax=ax, pad=0.01, fraction=0.03, label="cells")
             else:
-                ax.scatter(pt_v, vals_v, s=2, alpha=0.3,
-                           color="#4a90d9", rasterized=True)
+                if phases_arr is not None:
+                    ph_v = np.asarray(phases_arr[valid], dtype=str)
+                    present_phases = sorted(
+                        {p for p in ph_v if p not in ("Unclassified", "nan")},
+                        key=lambda p: PHASE_ORDER.index(p) if p in PHASE_ORDER
+                        else len(PHASE_ORDER),
+                    )
+                    for phase in present_phases:
+                        ph_mask = ph_v == phase
+                        if not ph_mask.any():
+                            continue
+                        ax.scatter(
+                            pt_v[ph_mask], vals_v[ph_mask],
+                            c=PHASE_COLORS.get(phase, "#aaaaaa"),
+                            s=2, alpha=0.4, linewidths=0, rasterized=True,
+                            label=phase.replace("_", " "),
+                        )
+                else:
+                    ax.scatter(pt_v, vals_v, s=2, alpha=0.3,
+                               color="#4a90d9", rasterized=True)
 
-        # Binned mean trend line
-        bin_edges = np.linspace(0, 1, bins + 1)
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
-        bin_means = np.array([
-            np.nanmean(vals_v[(pt_v >= lo) & (pt_v < hi)])
-            if ((pt_v >= lo) & (pt_v < hi)).sum() >= 3 else np.nan
-            for lo, hi in zip(bin_edges[:-1], bin_edges[1:])
-        ])
-        ok = ~np.isnan(bin_means)
-        if ok.sum() > 1:
-            ax.plot(bin_centers[ok], bin_means[ok],
-                    color="#d62728", lw=2.0, zorder=6, label="mean")
+            bin_means = np.array([
+                np.nanmean(vals_v[(pt_v >= lo) & (pt_v < hi)])
+                if ((pt_v >= lo) & (pt_v < hi)).sum() >= 3 else np.nan
+                for lo, hi in zip(bin_edges[:-1], bin_edges[1:])
+            ])
+            ok = ~np.isnan(bin_means)
+            if ok.sum() > 1:
+                ax.plot(bin_centers[ok], bin_means[ok],
+                        color="#d62728", lw=2.0, zorder=6, label="mean")
 
-        # Phase boundary lines (cycling phases only)
+        # Phase boundary lines (using all cycling cells on this panel)
         if has_phase and len(pt_v) > 0:
             ph_all_v = np.asarray(phases_arr[valid], dtype=str)
             unique_phases = sorted(
