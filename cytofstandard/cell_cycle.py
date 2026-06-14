@@ -748,6 +748,60 @@ _FALLBACK_ROLE_PRIORITY: list[str] = ["pRb", "DNA", "CyclinB1", "pH3", "IdU"]
 
 # ── Pseudotime helper functions ────────────────────────────────────────────────
 
+def _cyclic_bin_stats(
+    pt: np.ndarray,
+    vals: np.ndarray,
+    bin_edges: np.ndarray,
+    min_count: int = 3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Binned mean and SEM with circular (wrap-around) boundary handling.
+
+    Because cell-cycle pseudotime is cyclic, cells near pt=1 are neighbours
+    of cells near pt=0.  Standard binning leaves boundary bins under-sampled.
+    This function adds one extra bin on each side using a circularly-extended
+    copy of the data, so boundary bins include data from the other end of the
+    cycle.
+
+    Args:
+        pt: Pseudotime values in [0, 1).
+        vals: Marker values aligned with *pt*.
+        bin_edges: Edges of the n bins (length n+1), spanning [0, 1].
+        min_count: Minimum non-NaN cells required; otherwise NaN.
+
+    Returns:
+        centers   — bin centers for original n bins, shape (n,)
+        means     — binned means, shape (n,); NaN if too few cells
+        sems      — binned ±1 SEM, shape (n,); NaN if < 2 cells
+        close_y   — float: mean of cells at pt ∈ [0, bw) computed cyclically
+                    (use as a closing point at x=1 to complete the loop).
+    """
+    bw = bin_edges[1] - bin_edges[0]
+    ext_edges = np.concatenate([[-bw], bin_edges, [1.0 + bw]])
+
+    # Extend data by one copy shifted ±1 so boundary bins see wrapped data
+    pt_ext = np.concatenate([pt - 1.0, pt, pt + 1.0])
+    vals_ext = np.concatenate([vals, vals, vals])
+
+    n_ext = len(ext_edges) - 1
+    means_ext = np.full(n_ext, np.nan)
+    sems_ext = np.full(n_ext, np.nan)
+
+    for i, (lo, hi) in enumerate(zip(ext_edges[:-1], ext_edges[1:])):
+        in_bin = (pt_ext >= lo) & (pt_ext < hi)
+        v = vals_ext[in_bin]
+        v = v[~np.isnan(v)]
+        if len(v) >= min_count:
+            means_ext[i] = np.mean(v)
+        if len(v) >= 2:
+            sems_ext[i] = np.std(v, ddof=1) / np.sqrt(len(v))
+
+    centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    # means_ext[0] = extra first bin  (data from pt ∈ [1-bw, 1))
+    # means_ext[1:-1] = original n bins
+    # means_ext[-1]  = extra last bin  (data from pt ∈ [0, bw)) → closing point
+    return centers, means_ext[1:-1], sems_ext[1:-1], means_ext[-1]
+
+
 def _percentile_rank_0_1(values: np.ndarray) -> np.ndarray:
     """Percentile ranks scaled to [0, 1), NaN-aware, average-tied.
 
@@ -1310,7 +1364,6 @@ def plot_cell_cycle_pseudotime_markers(
         group_colors = {}
 
     bin_edges = np.linspace(0, 1, bins + 1)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 
     n_markers = len(resolved)
     n_cols = max(1, int(n_cols))
@@ -1346,30 +1399,29 @@ def plot_cell_cycle_pseudotime_markers(
                 pt_g, vals_g = pt_v[gm], vals_v[gm]
                 color = group_colors[grp]
 
-                bin_means = np.array([
-                    np.nanmean(vals_g[(pt_g >= lo) & (pt_g < hi)])
-                    if ((pt_g >= lo) & (pt_g < hi)).sum() >= 3 else np.nan
-                    for lo, hi in zip(bin_edges[:-1], bin_edges[1:])
-                ])
-
-                if show_sem:
-                    bin_sems = np.array([
-                        np.nanstd(vals_g[(pt_g >= lo) & (pt_g < hi)], ddof=1)
-                        / np.sqrt(((pt_g >= lo) & (pt_g < hi)).sum())
-                        if ((pt_g >= lo) & (pt_g < hi)).sum() >= 3 else np.nan
-                        for lo, hi in zip(bin_edges[:-1], bin_edges[1:])
-                    ])
-
+                centers, bin_means, bin_sems, close_y = _cyclic_bin_stats(
+                    pt_g, vals_g, bin_edges
+                )
                 ok = ~np.isnan(bin_means)
                 if ok.sum() < 2:
                     continue
-                ax.plot(bin_centers[ok], bin_means[ok],
-                        color=color, lw=2.0, zorder=5, label=str(grp))
+
+                xs = np.append(centers[ok], 1.0)
+                ys = np.append(bin_means[ok], close_y if not np.isnan(close_y) else bin_means[ok][0])
+                ax.plot(xs, ys, color=color, lw=2.0, zorder=5, label=str(grp))
+
                 if show_sem:
-                    lo_band = bin_means[ok] - bin_sems[ok]
-                    hi_band = bin_means[ok] + bin_sems[ok]
-                    ax.fill_between(bin_centers[ok], lo_band, hi_band,
-                                    color=color, alpha=0.15, zorder=4)
+                    ok_sem = ok & ~np.isnan(bin_sems)
+                    if ok_sem.sum() >= 2:
+                        xs_s = np.append(centers[ok_sem], 1.0)
+                        lo_band = np.append(bin_means[ok_sem] - bin_sems[ok_sem],
+                                            close_y - bin_sems[ok_sem][-1] if not np.isnan(close_y) else np.nan)
+                        hi_band = np.append(bin_means[ok_sem] + bin_sems[ok_sem],
+                                            close_y + bin_sems[ok_sem][-1] if not np.isnan(close_y) else np.nan)
+                        valid_band = ~np.isnan(lo_band) & ~np.isnan(hi_band)
+                        if valid_band.sum() >= 2:
+                            ax.fill_between(xs_s[valid_band], lo_band[valid_band],
+                                            hi_band[valid_band], color=color, alpha=0.15, zorder=4)
 
             # Legend only on first panel to avoid repetition
             if i == 0:
@@ -1404,15 +1456,12 @@ def plot_cell_cycle_pseudotime_markers(
                     ax.scatter(pt_v, vals_v, s=2, alpha=0.3,
                                color="#4a90d9", rasterized=True)
 
-            bin_means = np.array([
-                np.nanmean(vals_v[(pt_v >= lo) & (pt_v < hi)])
-                if ((pt_v >= lo) & (pt_v < hi)).sum() >= 3 else np.nan
-                for lo, hi in zip(bin_edges[:-1], bin_edges[1:])
-            ])
+            centers, bin_means, _, close_y = _cyclic_bin_stats(pt_v, vals_v, bin_edges)
             ok = ~np.isnan(bin_means)
             if ok.sum() > 1:
-                ax.plot(bin_centers[ok], bin_means[ok],
-                        color="#d62728", lw=2.0, zorder=6, label="mean")
+                xs = np.append(centers[ok], 1.0)
+                ys = np.append(bin_means[ok], close_y if not np.isnan(close_y) else bin_means[ok][0])
+                ax.plot(xs, ys, color="#d62728", lw=2.0, zorder=6, label="mean")
 
         # Phase boundary lines (using all cycling cells on this panel)
         if has_phase and len(pt_v) > 0:
