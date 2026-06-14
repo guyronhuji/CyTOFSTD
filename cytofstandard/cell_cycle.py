@@ -723,7 +723,10 @@ CYCLING_PHASE_ORDER: list[str] = [
 #                  which identifies S cells but isn't monotone through S)
 #   G2 phase     — CyclinB1 accumulates before M entry
 #   G2/M         — average CyclinB1 and pH3 ranks
-#   M phase      — pH3 (H3-Ser28/Ser10) peaks during mitosis
+#   M phase      — CyclinB1 descending: APC/C degrades CyclinB1 from anaphase
+#                  onset, so low CyclinB1 within M = late M (anaphase/telophase).
+#                  pH3 is bell-shaped (peaks at metaphase, not monotone) so is
+#                  wrong for ordering.  A "-" prefix means rank descending.
 PHASE_SCORE_ROLES: dict[str, str | list[str]] = {
     "G0":              "pRb",
     "G0_or_quiescent": "pRb",
@@ -738,8 +741,8 @@ PHASE_SCORE_ROLES: dict[str, str | list[str]] = {
     "G2":              "CyclinB1",
     "G2_phase":        "CyclinB1",
     "G2M":             ["CyclinB1", "pH3"],
-    "M":               "pH3",
-    "M_phase":         "pH3",
+    "M":               "-CyclinB1",   # descending: low CyclinB1 = late M
+    "M_phase":         "-CyclinB1",   # descending: low CyclinB1 = late M
 }
 
 # Fallback role priority for unknown phase labels
@@ -995,15 +998,17 @@ def _compute_within_phase_scores(
 
         score_arrays: list[np.ndarray] = []
         for role in roles:
-            if role not in markers.columns:
+            descending = role.startswith("-")
+            marker_name = role[1:] if descending else role
+            if marker_name not in markers.columns:
                 warnings.warn(
                     f"Marker role '{role}' needed for phase '{phase}' "
                     f"within-phase scoring is not available — skipping.",
                     UserWarning, stacklevel=5,
                 )
                 continue
-            vals = markers.loc[mask, role].values
-            score_arrays.append(_percentile_rank_0_1(vals))
+            vals = markers.loc[mask, marker_name].values
+            score_arrays.append(_percentile_rank_0_1(-vals if descending else vals))
 
         if not score_arrays:
             within_score[mask] = 0.5
