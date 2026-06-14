@@ -1060,7 +1060,8 @@ def add_cell_cycle_pseudotime(
     * **S phase** — ``DNA``: content increases through replication
     * **G2 phase** — ``CyclinB1``: accumulates before M entry
     * **G2/M** — average of ``CyclinB1`` and ``pH3`` ranks
-    * **M phase** — ``pH3``: peaks at mitosis
+    * **M phase** — ``CyclinB1`` descending: APC/C degrades CyclinB1 from
+      anaphase onset, so low CyclinB1 within M = late M
 
     Args:
         data: pandas DataFrame or AnnData. For AnnData, phase labels and
