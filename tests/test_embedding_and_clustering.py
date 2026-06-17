@@ -359,6 +359,56 @@ def test_cluster_leiden_overwrites_same_cluster_key(
     assert meta2["resolution"] == 2.0
 
 
+def test_cluster_dbscan_stores_labels_and_metadata(
+    temp_dir,
+    example_standard_markers_path,
+    example_marker_aliases_path,
+    monkeypatch,
+):
+    """cluster_dbscan should write obs labels and clusterings metadata."""
+    _install_fake_umap(monkeypatch)
+    run = _build_ingested_run(
+        temp_dir, example_standard_markers_path, example_marker_aliases_path
+    )
+
+    run.compute_umap(
+        markers=["H3", "ECad"],
+        source_layer="raw",
+        embedding_name="my_umap",
+    )
+
+    meta = run.cluster_dbscan(
+        embedding_name="my_umap",
+        eps=10.0,
+        min_samples=1,
+        verbose=True,
+    )
+
+    adata = run.read_adata()
+    assert "my_umap_dbscan" in adata.obs.columns
+    assert "my_umap_dbscan" in adata.uns["clusterings"]
+    assert meta["method"] == "dbscan"
+    assert meta["eps"] == 10.0
+    assert meta["min_samples"] == 1
+    assert meta["n_cells"] == 4
+    assert "dbscan_sec" in meta
+    assert meta["n_clusters"] + meta["n_noise"] <= 4
+
+
+def test_cluster_dbscan_missing_embedding_raises(
+    temp_dir,
+    example_standard_markers_path,
+    example_marker_aliases_path,
+):
+    """cluster_dbscan should raise if the embedding key is not in obsm."""
+    run = _build_ingested_run(
+        temp_dir, example_standard_markers_path, example_marker_aliases_path
+    )
+    import pytest
+    with pytest.raises(ValueError, match="not found in adata.obsm"):
+        run.cluster_dbscan(embedding_name="nonexistent")
+
+
 def test_compute_flowsom_stores_full_varm_weights_for_marker_subset(
     temp_dir,
     example_standard_markers_path,

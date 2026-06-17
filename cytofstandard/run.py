@@ -1674,6 +1674,113 @@ class Run:
 
         return metadata
 
+    def cluster_dbscan(
+        self,
+        embedding_name: str,
+        cluster_key: str | None = None,
+        eps: float = 0.5,
+        min_samples: int = 5,
+        metric: str = "euclidean",
+        verbose: bool = False,
+        inplace: bool = True,
+    ) -> dict[str, Any]:
+        """Cluster cells with DBSCAN on the coordinates of a stored embedding.
+
+        Operates directly on adata.obsm[embedding_name] (e.g. 2-D UMAP coordinates).
+        Noise points (DBSCAN label -1) are retained as the category ``"-1"``.
+        Existing clusterings with the same key are overwritten.
+
+        Args:
+            embedding_name: Key in adata.obsm to use as input coordinates.
+            cluster_key: Column name written to adata.obs. Defaults to
+                ``"{embedding_name}_dbscan"``.
+            eps: Maximum distance between two samples to be considered neighbours.
+            min_samples: Minimum neighbours for a point to be a core point.
+            metric: Distance metric passed to sklearn DBSCAN.
+            verbose: Print progress and result summary.
+            inplace: Persist to zarr immediately after clustering.
+
+        Returns:
+            Metadata dict with parameters, timing, n_clusters, and n_noise.
+        """
+        import time as _time
+
+        try:
+            from sklearn.cluster import DBSCAN
+        except ImportError as exc:
+            raise ImportError(
+                "cluster_dbscan requires scikit-learn. Install with: pip install scikit-learn"
+            ) from exc
+
+        adata = self.read_adata()
+
+        if embedding_name not in adata.obsm:
+            raise ValueError(
+                f"Embedding '{embedding_name}' not found in adata.obsm. "
+                f"Available: {list(adata.obsm.keys())}"
+            )
+
+        cluster_key = cluster_key or f"{embedding_name}_dbscan"
+        coords = np.asarray(adata.obsm[embedding_name], dtype=np.float32)
+
+        if verbose:
+            print(
+                f"[cluster_dbscan] embedding='{embedding_name}' "
+                f"cluster_key='{cluster_key}' eps={eps} min_samples={min_samples} "
+                f"metric='{metric}' cells={adata.n_obs}"
+            )
+
+        t0 = _time.perf_counter()
+        labels = DBSCAN(eps=eps, min_samples=min_samples, metric=metric).fit_predict(coords)
+        dbscan_sec = float(_time.perf_counter() - t0)
+
+        n_noise = int(np.sum(labels == -1))
+        n_clusters = int(len(set(labels.tolist())) - (1 if -1 in labels else 0))
+
+        adata.obs[cluster_key] = pd.Categorical(labels.astype(str))
+
+        clusterings_uns = self._upsert_nested_uns_dict(adata, "clusterings")
+        metadata = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "method": "dbscan",
+            "embedding_name": embedding_name,
+            "cluster_key": cluster_key,
+            "eps": float(eps),
+            "min_samples": int(min_samples),
+            "metric": str(metric),
+            "verbose": bool(verbose),
+            "n_cells": int(adata.n_obs),
+            "n_clusters": n_clusters,
+            "n_noise": n_noise,
+            "dbscan_sec": dbscan_sec,
+        }
+        clusterings_uns[cluster_key] = metadata
+
+        if verbose:
+            print(
+                f"[cluster_dbscan] done cluster_key='{cluster_key}' "
+                f"n_clusters={n_clusters} n_noise={n_noise} dbscan_sec={dbscan_sec:.3f}"
+            )
+
+        self._adata = adata
+        self._log_run_event(
+            "dbscan_clustered",
+            {
+                "embedding_name": embedding_name,
+                "cluster_key": cluster_key,
+                "eps": float(eps),
+                "min_samples": int(min_samples),
+                "metric": str(metric),
+                "n_clusters": n_clusters,
+                "n_noise": n_noise,
+                "n_cells": int(adata.n_obs),
+            },
+        )
+        if inplace:
+            self._try_save_inplace()
+
+        return metadata
+
     @staticmethod
     def _knn_to_jaccard_graph_arrays(
         knn_idx: np.ndarray,
