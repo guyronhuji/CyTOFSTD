@@ -47,7 +47,7 @@ tab_umap, tab_leiden, tab_flowsom = st.tabs(["UMAP", "Leiden", "FlowSOM"])
 with tab_umap:
     st.subheader("Compute UMAP embedding")
     st.write(
-        "Computes a 2-D embedding using `mlx-umap` and stores the KNN graph required for Leiden clustering."
+        "Computes a 2-D embedding using `umap-learn` and stores the KNN graph required for Leiden clustering."
     )
 
     umap_markers = st.multiselect(

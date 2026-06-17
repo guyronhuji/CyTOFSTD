@@ -1067,23 +1067,41 @@ class Run:
             self._try_save_inplace()
 
     @staticmethod
-    def _load_mlx_umap_modules(module_name: str = "mlx_umap"):
-        """Import mlx_umap main module and its knn helper submodule."""
+    def _load_umap_module():
+        """Import standard umap-learn module."""
         try:
-            umap_module = importlib.import_module(module_name)
-            knn_module = importlib.import_module(f"{module_name}._knn")
+            import umap as umap_module
         except ImportError as exc:
             raise ImportError(
-                "compute_umap requires mlx-umap (module 'mlx_umap'). "
-                "Install/make it importable and retry."
+                "compute_umap requires umap-learn. "
+                "Install it with: pip install umap-learn"
             ) from exc
-
         if not hasattr(umap_module, "UMAP"):
-            raise ImportError(f"{module_name} does not expose UMAP class")
-        if not hasattr(knn_module, "compute_knn"):
-            raise ImportError(f"{module_name}._knn does not expose compute_knn")
+            raise ImportError("umap module does not expose UMAP class")
+        return umap_module
 
-        return umap_module, knn_module
+    @staticmethod
+    def _compute_knn_sklearn(
+        x: np.ndarray, n_neighbors: int, metric: str
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Compute KNN using sklearn NearestNeighbors.
+
+        Returns (knn_idx, knn_dist) each of shape (n_cells, effective_k),
+        excluding self-neighbors. effective_k is clamped to n_cells - 1.
+        """
+        try:
+            from sklearn.neighbors import NearestNeighbors
+        except ImportError as exc:
+            raise ImportError(
+                "compute_umap requires scikit-learn for KNN. "
+                "Install it with: pip install scikit-learn"
+            ) from exc
+        n_cells = x.shape[0]
+        effective_k = min(n_neighbors, n_cells - 1)
+        nn = NearestNeighbors(n_neighbors=effective_k + 1, metric=metric, algorithm="auto")
+        nn.fit(x)
+        dists, indices = nn.kneighbors(x)
+        return indices[:, 1:].astype(np.int32), dists[:, 1:].astype(np.float32)
 
     @staticmethod
     def _knn_to_graph_arrays(knn_idx: np.ndarray, knn_dist: np.ndarray, n_nodes: int):
@@ -1162,17 +1180,19 @@ class Run:
         min_dist: float = 0.1,
         metric: str = "euclidean",
         random_state: int = 42,
-        knn_method: str = "brute",
+        subsample_size: int | None = 50_000,
+        chunk_size: int = 50_000,
         verbose: bool = False,
-        module_name: str = "mlx_umap",
         inplace: bool = True,
     ) -> dict[str, Any]:
-        """Compute UMAP embedding from selected markers using mlx-umap.
+        """Compute UMAP embedding from selected markers using umap-learn.
 
-        Also computes/stores KNN and graph artifacts required for downstream Leiden.
-        Existing artifacts with the same `embedding_name` are overwritten.
+        Fits on a random subsample of up to `subsample_size` cells, then
+        transforms all cells in chunks of `chunk_size`. Set `subsample_size=None`
+        to fit on the full dataset. Also computes/stores KNN and graph artifacts
+        required for downstream Leiden. Existing artifacts with the same
+        `embedding_name` are overwritten.
         """
-        import inspect as _inspect
         import time as _time
 
         if not markers:
@@ -1183,7 +1203,7 @@ class Run:
             raise ValueError("n_components must be > 0")
 
         adata = self.read_adata()
-        umap_module, knn_module = self._load_mlx_umap_modules(module_name)
+        umap_module = self._load_umap_module()
 
         matrix = self._matrix_from_layer(adata, source_layer)
         var_names = adata.var_names.astype(str).tolist()
@@ -1195,51 +1215,53 @@ class Run:
 
         marker_idx = [marker_to_idx[marker] for marker in markers]
         x_embed = np.asarray(matrix[:, marker_idx], dtype=np.float32)
+        n_cells = x_embed.shape[0]
 
         self._clear_embedding_artifacts(adata, embedding_name)
 
         if verbose:
             print(
                 f"[compute_umap] embedding='{embedding_name}' layer='{source_layer}' "
-                f"cells={adata.n_obs} markers={len(markers)}"
+                f"cells={n_cells} markers={len(markers)}"
             )
 
-        umap_kwargs = {
-            "n_components": n_components,
-            "n_neighbors": n_neighbors,
-            "min_dist": min_dist,
-            "metric": metric,
-            "random_state": random_state,
-            "knn_method": knn_method,
-        }
-        try:
-            params = _inspect.signature(umap_module.UMAP).parameters
-            if "verbose" in params:
-                umap_kwargs["verbose"] = verbose
-        except (TypeError, ValueError):
-            pass
-
-        t0 = _time.perf_counter()
-        umap_model = umap_module.UMAP(**umap_kwargs)
-        embedding = np.asarray(umap_model.fit_transform(x_embed), dtype=np.float32)
-        umap_sec = float(_time.perf_counter() - t0)
-
-        t1 = _time.perf_counter()
-        knn_idx, knn_dist = knn_module.compute_knn(
-            x_embed,
-            n_neighbors,
-            method=knn_method,
+        umap_model = umap_module.UMAP(
+            n_components=n_components,
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            metric=metric,
             random_state=random_state,
             verbose=verbose,
         )
-        knn_idx = np.asarray(knn_idx, dtype=np.int32)
-        knn_dist = np.asarray(knn_dist, dtype=np.float32)
+
+        t0 = _time.perf_counter()
+        if subsample_size is not None and subsample_size < n_cells:
+            rng = np.random.default_rng(random_state)
+            fit_idx = rng.choice(n_cells, size=subsample_size, replace=False)
+            if verbose:
+                print(
+                    f"[compute_umap] fitting on {subsample_size} cells, "
+                    f"transforming {n_cells} in chunks of {chunk_size}"
+                )
+            umap_model.fit(x_embed[fit_idx])
+        else:
+            umap_model.fit(x_embed)
+            subsample_size = None
+
+        chunks = []
+        for start in range(0, n_cells, chunk_size):
+            chunks.append(umap_model.transform(x_embed[start : start + chunk_size]))
+        embedding = np.vstack(chunks).astype(np.float32)
+        umap_sec = float(_time.perf_counter() - t0)
+
+        t1 = _time.perf_counter()
+        knn_idx, knn_dist = self._compute_knn_sklearn(x_embed, n_neighbors, metric)
         knn_sec = float(_time.perf_counter() - t1)
 
         uu, vv, weights, dists, sigma = self._knn_to_graph_arrays(
             knn_idx,
             knn_dist,
-            adata.n_obs,
+            n_cells,
         )
 
         try:
@@ -1256,12 +1278,12 @@ class Run:
 
         connectivities = sp.csr_matrix(
             (conn_vals, (edge_u, edge_v)),
-            shape=(adata.n_obs, adata.n_obs),
+            shape=(n_cells, n_cells),
             dtype=np.float32,
         )
         distances = sp.csr_matrix(
             (dist_vals, (edge_u, edge_v)),
-            shape=(adata.n_obs, adata.n_obs),
+            shape=(n_cells, n_cells),
             dtype=np.float32,
         )
 
@@ -1280,8 +1302,7 @@ class Run:
         embeddings_uns = self._upsert_nested_uns_dict(adata, "embeddings")
         metadata = {
             "timestamp": datetime.utcnow().isoformat(),
-            "method": "mlx_umap",
-            "module": module_name,
+            "method": "umap",
             "verbose": bool(verbose),
             "source_layer": source_layer,
             "markers": list(markers),
@@ -1290,14 +1311,15 @@ class Run:
             "min_dist": float(min_dist),
             "metric": str(metric),
             "random_state": int(random_state),
-            "knn_method": str(knn_method),
+            "subsample_size": int(subsample_size) if subsample_size is not None else None,
+            "chunk_size": int(chunk_size),
             "sigma": float(sigma),
             "embedding_key": embedding_key,
             "knn_indices_key": knn_indices_key,
             "knn_distances_key": knn_distances_key,
             "connectivities_key": connectivities_key,
             "distances_key": distances_key,
-            "n_cells": int(adata.n_obs),
+            "n_cells": int(n_cells),
             "n_markers": int(len(markers)),
             "umap_sec": umap_sec,
             "knn_sec": knn_sec,
@@ -1320,9 +1342,9 @@ class Run:
                 "n_components": int(n_components),
                 "min_dist": float(min_dist),
                 "metric": str(metric),
-                "knn_method": str(knn_method),
+                "subsample_size": int(subsample_size) if subsample_size is not None else None,
                 "n_markers": int(len(markers)),
-                "n_cells": int(adata.n_obs),
+                "n_cells": int(n_cells),
             },
         )
         if inplace:
@@ -1343,21 +1365,18 @@ class Run:
         min_dist: float = 0.1,
         metric: str = "euclidean",
         random_state: int = 42,
-        knn_method: str = "brute",
+        chunk_size: int = 50_000,
         verbose: bool = False,
-        module_name: str = "mlx_umap",
         inplace: bool = True,
     ) -> dict[str, Any]:
         """Compute UMAP with fit on balanced subsample, then transform all cells.
 
         The balanced subsample is defined by `groupby_col`, using `n_per_group`
         cells per group (or the smallest group size if None). The UMAP model
-        is fit on the subsample, then used to transform all cells.
-
-        KNN and graph artifacts are still computed for the full dataset to
-        support downstream Leiden clustering.
+        is fit on the subsample, then all cells are transformed in chunks of
+        `chunk_size`. KNN and graph artifacts are computed on the full dataset
+        to support downstream Leiden clustering.
         """
-        import inspect as _inspect
         import time as _time
 
         if not markers:
@@ -1374,7 +1393,7 @@ class Run:
                 f"Available columns: {adata.obs.columns.tolist()}"
             )
 
-        umap_module, knn_module = self._load_mlx_umap_modules(module_name)
+        umap_module = self._load_umap_module()
 
         matrix = self._matrix_from_layer(adata, source_layer)
         var_names = adata.var_names.astype(str).tolist()
@@ -1386,6 +1405,7 @@ class Run:
 
         marker_idx = [marker_to_idx[marker] for marker in markers]
         x_embed = np.asarray(matrix[:, marker_idx], dtype=np.float32)
+        n_cells = x_embed.shape[0]
 
         self._clear_embedding_artifacts(adata, embedding_name)
 
@@ -1400,52 +1420,36 @@ class Run:
         if verbose:
             print(
                 f"[compute_umap_balanced] embedding='{embedding_name}' layer='{source_layer}' "
-                f"cells={adata.n_obs} markers={len(markers)} groups={len(counts)} "
+                f"cells={n_cells} markers={len(markers)} groups={len(counts)} "
                 f"n_per_group={target_n}"
             )
 
-        umap_kwargs = {
-            "n_components": n_components,
-            "n_neighbors": n_neighbors,
-            "min_dist": min_dist,
-            "metric": metric,
-            "random_state": random_state,
-            "knn_method": knn_method,
-        }
-        try:
-            params = _inspect.signature(umap_module.UMAP).parameters
-            if "verbose" in params:
-                umap_kwargs["verbose"] = verbose
-        except (TypeError, ValueError):
-            pass
-
-        umap_model = umap_module.UMAP(**umap_kwargs)
-        if not hasattr(umap_model, "fit") or not hasattr(umap_model, "transform"):
-            raise ImportError(
-                "compute_umap_balanced requires UMAP with fit() and transform()"
-            )
-
-        t0 = _time.perf_counter()
-        umap_model.fit(x_embed[fit_idx])
-        embedding = np.asarray(umap_model.transform(x_embed), dtype=np.float32)
-        umap_sec = float(_time.perf_counter() - t0)
-
-        t1 = _time.perf_counter()
-        knn_idx, knn_dist = knn_module.compute_knn(
-            x_embed,
-            n_neighbors,
-            method=knn_method,
+        umap_model = umap_module.UMAP(
+            n_components=n_components,
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            metric=metric,
             random_state=random_state,
             verbose=verbose,
         )
-        knn_idx = np.asarray(knn_idx, dtype=np.int32)
-        knn_dist = np.asarray(knn_dist, dtype=np.float32)
+
+        t0 = _time.perf_counter()
+        umap_model.fit(x_embed[fit_idx])
+
+        chunks = []
+        for start in range(0, n_cells, chunk_size):
+            chunks.append(umap_model.transform(x_embed[start : start + chunk_size]))
+        embedding = np.vstack(chunks).astype(np.float32)
+        umap_sec = float(_time.perf_counter() - t0)
+
+        t1 = _time.perf_counter()
+        knn_idx, knn_dist = self._compute_knn_sklearn(x_embed, n_neighbors, metric)
         knn_sec = float(_time.perf_counter() - t1)
 
         uu, vv, weights, dists, sigma = self._knn_to_graph_arrays(
             knn_idx,
             knn_dist,
-            adata.n_obs,
+            n_cells,
         )
 
         try:
@@ -1462,12 +1466,12 @@ class Run:
 
         connectivities = sp.csr_matrix(
             (conn_vals, (edge_u, edge_v)),
-            shape=(adata.n_obs, adata.n_obs),
+            shape=(n_cells, n_cells),
             dtype=np.float32,
         )
         distances = sp.csr_matrix(
             (dist_vals, (edge_u, edge_v)),
-            shape=(adata.n_obs, adata.n_obs),
+            shape=(n_cells, n_cells),
             dtype=np.float32,
         )
 
@@ -1486,8 +1490,7 @@ class Run:
         embeddings_uns = self._upsert_nested_uns_dict(adata, "embeddings")
         metadata = {
             "timestamp": datetime.utcnow().isoformat(),
-            "method": "mlx_umap_balanced",
-            "module": module_name,
+            "method": "umap_balanced",
             "verbose": bool(verbose),
             "source_layer": source_layer,
             "markers": list(markers),
@@ -1496,14 +1499,14 @@ class Run:
             "min_dist": float(min_dist),
             "metric": str(metric),
             "random_state": int(random_state),
-            "knn_method": str(knn_method),
+            "chunk_size": int(chunk_size),
             "sigma": float(sigma),
             "embedding_key": embedding_key,
             "knn_indices_key": knn_indices_key,
             "knn_distances_key": knn_distances_key,
             "connectivities_key": connectivities_key,
             "distances_key": distances_key,
-            "n_cells": int(adata.n_obs),
+            "n_cells": int(n_cells),
             "n_markers": int(len(markers)),
             "umap_sec": umap_sec,
             "knn_sec": knn_sec,
@@ -1531,7 +1534,7 @@ class Run:
                 "n_per_group": int(target_n),
                 "n_groups": int(len(counts)),
                 "n_markers": int(len(markers)),
-                "n_cells": int(adata.n_obs),
+                "n_cells": int(n_cells),
             },
         )
         if inplace:

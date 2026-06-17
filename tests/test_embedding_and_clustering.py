@@ -9,44 +9,33 @@ import pandas as pd
 from cytofstandard import Project
 
 
-def _install_fake_mlx_umap(monkeypatch):
-    """Install fake mlx_umap and mlx_umap._knn modules for tests."""
-    fake_module = types.ModuleType("fake_mlx_umap")
-    fake_knn = types.ModuleType("fake_mlx_umap._knn")
+def _install_fake_umap(monkeypatch):
+    """Install fake umap module for tests."""
+    fake_umap = types.ModuleType("umap")
 
     class FakeUMAP:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
-            self.fit_shape = None
+            self._n_components = int(kwargs.get("n_components", 2))
 
         def fit(self, x):
             x = np.asarray(x, dtype=np.float32)
-            self.fit_shape = x.shape
+            self._fitted = True
             return self
 
         def transform(self, x):
             x = np.asarray(x, dtype=np.float32)
-            if x.shape[1] == 1:
-                return np.concatenate([x, x], axis=1)
-            return x[:, :2]
+            nc = self._n_components
+            if x.shape[1] >= nc:
+                return x[:, :nc]
+            return np.tile(x[:, :1], nc)
 
         def fit_transform(self, x):
             self.fit(x)
             return self.transform(x)
 
-    def compute_knn(x, k, method="brute", random_state=42, verbose=False):
-        x = np.asarray(x, dtype=np.float32)
-        n = x.shape[0]
-        dmat = np.sqrt(((x[:, None, :] - x[None, :, :]) ** 2).sum(axis=2))
-        order = np.argsort(dmat, axis=1)[:, :k]
-        dists = np.take_along_axis(dmat, order, axis=1)
-        return order.astype(np.int32), dists.astype(np.float32)
-
-    fake_module.UMAP = FakeUMAP
-    fake_knn.compute_knn = compute_knn
-
-    monkeypatch.setitem(__import__("sys").modules, "fake_mlx_umap", fake_module)
-    monkeypatch.setitem(__import__("sys").modules, "fake_mlx_umap._knn", fake_knn)
+    fake_umap.UMAP = FakeUMAP
+    monkeypatch.setitem(__import__("sys").modules, "umap", fake_umap)
 
 
 def _install_fake_igraph(monkeypatch):
@@ -209,7 +198,7 @@ def test_compute_umap_stores_embedding_and_graph(
     monkeypatch,
 ):
     """compute_umap stores embedding metadata and graph artifacts."""
-    _install_fake_mlx_umap(monkeypatch)
+    _install_fake_umap(monkeypatch)
     run = _build_ingested_run(
         temp_dir, example_standard_markers_path, example_marker_aliases_path
     )
@@ -219,7 +208,6 @@ def test_compute_umap_stores_embedding_and_graph(
         source_layer="raw",
         embedding_name="my_umap",
         verbose=True,
-        module_name="fake_mlx_umap",
     )
 
     adata = run.read_adata()
@@ -242,7 +230,7 @@ def test_compute_umap_overwrites_same_name(
     monkeypatch,
 ):
     """Recomputing same embedding name should overwrite metadata/artifacts."""
-    _install_fake_mlx_umap(monkeypatch)
+    _install_fake_umap(monkeypatch)
     run = _build_ingested_run(
         temp_dir, example_standard_markers_path, example_marker_aliases_path
     )
@@ -252,14 +240,12 @@ def test_compute_umap_overwrites_same_name(
         source_layer="raw",
         embedding_name="my_umap",
         n_neighbors=5,
-        module_name="fake_mlx_umap",
     )
     meta2 = run.compute_umap(
         markers=["H3", "H3K27me3"],
         source_layer="raw",
         embedding_name="my_umap",
         n_neighbors=7,
-        module_name="fake_mlx_umap",
     )
 
     adata = run.read_adata()
@@ -286,7 +272,7 @@ def test_compute_umap_balanced_stores_embedding(
     example_marker_aliases_path,
     monkeypatch,
 ):
-    _install_fake_mlx_umap(monkeypatch)
+    _install_fake_umap(monkeypatch)
     run = _build_ingested_run(
         temp_dir, example_standard_markers_path, example_marker_aliases_path
     )
@@ -297,7 +283,6 @@ def test_compute_umap_balanced_stores_embedding(
         embedding_name="balanced_umap",
         groupby_col="sample_id",
         n_per_group=1,
-        module_name="fake_mlx_umap",
     )
 
     adata = run.read_adata()
@@ -315,7 +300,7 @@ def test_cluster_leiden_from_embedding(
     monkeypatch,
 ):
     """cluster_leiden should cluster from stored embedding graph and persist metadata."""
-    _install_fake_mlx_umap(monkeypatch)
+    _install_fake_umap(monkeypatch)
     _install_fake_igraph(monkeypatch)
     run = _build_ingested_run(
         temp_dir, example_standard_markers_path, example_marker_aliases_path
@@ -325,7 +310,6 @@ def test_cluster_leiden_from_embedding(
         markers=["H3", "ECad"],
         source_layer="raw",
         embedding_name="my_umap",
-        module_name="fake_mlx_umap",
     )
 
     meta = run.cluster_leiden(
@@ -350,7 +334,7 @@ def test_cluster_leiden_overwrites_same_cluster_key(
     monkeypatch,
 ):
     """Repeated clustering with same key should overwrite previous metadata."""
-    _install_fake_mlx_umap(monkeypatch)
+    _install_fake_umap(monkeypatch)
     _install_fake_igraph(monkeypatch)
     run = _build_ingested_run(
         temp_dir, example_standard_markers_path, example_marker_aliases_path
@@ -360,7 +344,6 @@ def test_cluster_leiden_overwrites_same_cluster_key(
         markers=["H3", "ECad"],
         source_layer="raw",
         embedding_name="my_umap",
-        module_name="fake_mlx_umap",
     )
     run.cluster_leiden(
         embedding_name="my_umap", cluster_key="leiden_custom", resolution=0.5

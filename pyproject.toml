@@ -20,7 +20,9 @@ dependencies = [
   "tqdm",
   "fcsparser",
   "flowsom",
-  "vendi-score"
+  "vendi-score",
+  "umap-learn",
+  "scikit-learn"
 ]
 
 [tool.setuptools.packages.find]
