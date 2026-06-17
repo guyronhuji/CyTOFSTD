@@ -1564,11 +1564,13 @@ class Run:
         adata = self.read_adata()
         embeddings_uns = self._upsert_nested_uns_dict(adata, "embeddings")
 
+        available = [k for k, v in embeddings_uns.items() if isinstance(v, dict)]
         if embedding_name not in embeddings_uns or not isinstance(
             embeddings_uns[embedding_name], dict
         ):
             raise ValueError(
-                f"Embedding '{embedding_name}' not found. Run compute_umap first."
+                f"Embedding '{embedding_name}' not found. "
+                f"Available embeddings: {available}"
             )
         embed_meta = embeddings_uns[embedding_name]
 
@@ -1892,12 +1894,13 @@ class Run:
         adata = self.read_adata()
         embeddings_uns = self._upsert_nested_uns_dict(adata, "embeddings")
 
+        available = [k for k, v in embeddings_uns.items() if isinstance(v, dict)]
         if embedding_name not in embeddings_uns or not isinstance(
             embeddings_uns[embedding_name], dict
         ):
             raise ValueError(
-                f"Embedding '{embedding_name}' not found in uns. "
-                "Run compute_umap first."
+                f"Embedding '{embedding_name}' not found. "
+                f"Available embeddings: {available}"
             )
         embed_meta = embeddings_uns[embedding_name]
 
