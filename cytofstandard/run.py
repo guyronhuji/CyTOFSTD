@@ -1240,18 +1240,18 @@ class Run:
             fit_idx = rng.choice(n_cells, size=subsample_size, replace=False)
             if verbose:
                 print(
-                    f"[compute_umap] fitting on {subsample_size} cells, "
-                    f"transforming {n_cells} in chunks of {chunk_size}"
+                    f"[compute_umap] fit_transform on {subsample_size} cells, "
+                    f"transform rest ({n_cells - subsample_size}) in chunks of {chunk_size}"
                 )
-            umap_model.fit(x_embed[fit_idx])
+            embedding = np.empty((n_cells, n_components), dtype=np.float32)
+            embedding[fit_idx] = umap_model.fit_transform(x_embed[fit_idx])
+            rest_idx = np.setdiff1d(np.arange(n_cells), fit_idx)
+            for start in range(0, len(rest_idx), chunk_size):
+                chunk = rest_idx[start : start + chunk_size]
+                embedding[chunk] = umap_model.transform(x_embed[chunk])
         else:
-            umap_model.fit(x_embed)
+            embedding = umap_model.fit_transform(x_embed).astype(np.float32)
             subsample_size = None
-
-        chunks = []
-        for start in range(0, n_cells, chunk_size):
-            chunks.append(umap_model.transform(x_embed[start : start + chunk_size]))
-        embedding = np.vstack(chunks).astype(np.float32)
         umap_sec = float(_time.perf_counter() - t0)
 
         t1 = _time.perf_counter()
@@ -1434,12 +1434,12 @@ class Run:
         )
 
         t0 = _time.perf_counter()
-        umap_model.fit(x_embed[fit_idx])
-
-        chunks = []
-        for start in range(0, n_cells, chunk_size):
-            chunks.append(umap_model.transform(x_embed[start : start + chunk_size]))
-        embedding = np.vstack(chunks).astype(np.float32)
+        embedding = np.empty((n_cells, n_components), dtype=np.float32)
+        embedding[fit_idx] = umap_model.fit_transform(x_embed[fit_idx])
+        rest_idx = np.setdiff1d(np.arange(n_cells), fit_idx)
+        for start in range(0, len(rest_idx), chunk_size):
+            chunk = rest_idx[start : start + chunk_size]
+            embedding[chunk] = umap_model.transform(x_embed[chunk])
         umap_sec = float(_time.perf_counter() - t0)
 
         t1 = _time.perf_counter()
