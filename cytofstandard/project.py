@@ -365,7 +365,7 @@ class Project:
                     "operator": operator,
                     "created_at": run_config["created_at"],
                     "status": "registered",
-                    "path": str(run_path),
+                    "path": f"runs/{run_id}",
                 }
             ]
         )
@@ -401,8 +401,7 @@ class Project:
         if not self.has_run(run_id):
             raise RunNotFoundError(f"Run '{run_id}' not found in project")
 
-        run_info = self._run_registry[self._run_registry["run_id"] == run_id].iloc[0]
-        run_path = Path(run_info["path"])
+        run_path = self.runs_dir / run_id
 
         if validate:
             self._validate_run_structure(run_path)
@@ -431,7 +430,7 @@ class Project:
             raise RunNotFoundError(f"Run '{run_id}' not found in project")
 
         run_info = self._run_registry[self._run_registry["run_id"] == run_id].iloc[0]
-        run_path = Path(run_info["path"])
+        run_path = self.runs_dir / run_id
         had_files = run_path.exists()
 
         if run_path.exists():
@@ -476,7 +475,7 @@ class Project:
         if old_name == new_name:
             return
 
-        run_path = Path(run_info["path"])
+        run_path = self.runs_dir / run_id
         run_yaml_path = run_path / "run.yaml"
         if not run_yaml_path.exists():
             raise RunValidationError(
