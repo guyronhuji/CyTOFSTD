@@ -348,6 +348,7 @@ run.normalize_with_cytof_transform(
     markers_to_correct=["H3K27ac", "H3K4me3"],
     source_layer="raw",
     groupby_col="sample_id",
+    method="regress",   # or "divide" (legacy, needs a raw source_layer)
 )
 
 # Balanced z-score

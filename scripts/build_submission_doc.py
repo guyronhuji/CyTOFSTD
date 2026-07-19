@@ -701,7 +701,7 @@ add_table(
         ["project_id / run_id", "Project and run identifiers."],
         ["marker_mapping", "Dict mapping each standard marker name to the original names found in source files."],
         ["ingestion_settings", "drop_columns, strict_markers, copy_raw, common_markers_only flags used at ingestion."],
-        ["normalization", "Control markers, markers corrected, groupby column, cofactor, and output layer names."],
+        ["normalization", "Every setting of the normalization call: method (regress or divide), control markers, markers corrected, groupby column, cofactor, gamma mode, protected covariates, compartments, and output layer names."],
         ["zscore_<layer>", "Balancing parameters and mean/std values used for z-scoring."],
         ["clusterings", "One entry per cluster_leiden / cluster_leiden_jaccard call with resolution and seed."],
         ["embeddings", "One entry per compute_umap call with marker list, neighbors, and UMAP parameters."],

@@ -23,7 +23,7 @@ The matrix pointed to by `X` changes over the processing pipeline:
 | After step | `X` contains |
 |------------|--------------|
 | Ingestion | `arcsinh(raw / 5)` transformed values (same as `layers["raw"]` passed through arcsinh) |
-| `normalize()` | unchanged — `X` still holds arcsinh values; normalized values go in `layers["normalized"]` |
+| `normalize_with_cytof_transform()` | unchanged — `X` still holds arcsinh values; normalized values go in `layers["normalized"]` |
 | Gating | unchanged |
 
 > All gating (QC, cell-cycle) operates on `X` by default.  Pass `layer=` to override.
@@ -35,8 +35,8 @@ The matrix pointed to by `X` changes over the processing pipeline:
 | Key | Written by | Contents |
 |-----|-----------|----------|
 | `"raw"` | `Run.ingest()` | Raw ion counts as loaded from FCS/CSV/Parquet, **before** any transformation |
-| `"normalized"` | `Run.normalize()` | Variance-stabilised, batch-corrected values (method stored in `uns["normalization"]`) |
-| `"zscore"` | `Run.zscore()` | Per-marker z-scores computed across the run or a reference group |
+| `"normalized"` | `Run.normalize_with_cytof_transform()` | Technical-factor-corrected values in arcsinh space (method and all settings stored in `uns["normalization"]`) |
+| `"normalized_z"` | `Run.normalize_with_cytof_transform()` / `Run.zscore_markers_balanced()` | Per-marker z-scores computed across the run or a balanced reference group |
 
 ---
 
@@ -79,7 +79,7 @@ Any additional columns in the sample metadata CSV are also copied here verbatim.
 
 | Column | Type | Written by | Description |
 |--------|------|-----------|-------------|
-| `norm_tech_factor` | float | `Run.normalize()` | Per-cell technical correction factor applied during normalization |
+| `norm_tech_factor` | float | `Run.normalize_with_cytof_transform()` | Per-cell technical factor. PC1 of the control markers for `method="regress"`, or the permeabilization factor for `method="divide"` (see `tech_factor_kind`) |
 
 ---
 
@@ -275,21 +275,51 @@ Written by `Run.gate_qc()`. Has `"latest"` and `"history"` entries.
 
 ### `uns["normalization"]`
 
-Written by `Run.normalize()`.
+Written by `Run.normalize_with_cytof_transform()`. Every parameter of the call is
+recorded, so a normalized run is reproducible from its own record. `history` is
+append-only: each call adds one JSON string, and `latest` mirrors the most recent.
 
 ```python
 {
     "latest": {
         "timestamp": str,
-        "method": str,            # e.g. "quantile", "cyclical_loess"
-        "groupby": str | None,
-        "reference_group": str | None,
-        "n_cells": int,
-        "markers": list[str],
+        "method": str,                  # "regress" (PC1 regression) | "divide" (legacy)
+        "entry_point": str,             # cytof_transform function actually called
+        "module": str,                  # module name imported
+        "module_version": str,          # cytof_transform version
+        "groupby_col": str,             # obs column normalized within
+        "groups": list[str],
+        "source_layer": str,
+        "corrected_layer": str,
+        "z_layer": str,
+        "input_is_arcsinh": bool,
+        "arcsinh_cofactor": float,
+        "control_markers": list[str],
+        "markers_to_correct": list[str],
+        "anchor_to_median": bool,
+        "zscore": bool,
+        # --- regression family (method="regress") ---
+        "gamma_mode": str,              # per_marker | single | shrink | shrink_stability
+        "shrink_target": str,           # control | global
+        "protect_covariates": list[str],   # adjusted for, but kept
+        "stability_group_col": str | None,
+        "min_group_cells": int,
+        "compartment_col": str | None,
+        "compartments": list[str],
+        # --- outputs ---
+        "tech_factor_kind": str,        # "pc1" | "permeabilization_factor"
+        "n_before": int,
+        "n_after": int,
+        "gamma_by_group": dict,         # group -> {marker: gamma}
+        "alpha_by_group": dict,         # group -> {marker: intercept}
+        "gamma_shrink_by_group": dict,  # group -> shrinkage diagnostics table + attrs
     },
-    "history": [...]
+    "history": [str, ...]               # JSON strings, one per call
 }
 ```
+
+The same parameters are mirrored to the run provenance log
+(`runs/<run_id>/logs/provenance.jsonl`) under the `run_normalized` event.
 
 ### `uns["zscore"]`
 
@@ -416,8 +446,9 @@ ingest()
 gate_qc()
     → obs["qc_pass"], obs["qc_reason"], uns["qc"]
 
-normalize()
-    → layers["normalized"], obs["norm_tech_factor"], uns["normalization"]
+normalize_with_cytof_transform()
+    → layers["normalized"], layers["normalized_z"],
+      obs["norm_tech_factor"], uns["normalization"]
 
 embed()
     → obsm["X_umap"], obsp connectivities/distances
