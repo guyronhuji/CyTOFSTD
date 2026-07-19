@@ -119,6 +119,22 @@ summary = run.normalize_with_cytof_transform(
 )
 ```
 
+With `cytof_transform >= 0.2.0` you can pick the normalization family and tune
+the slope estimation:
+
+```python
+summary = run.normalize_with_cytof_transform(
+    control_markers=["H3.3", "H3", "H4"],
+    markers_to_correct=["H3K27ac", "H3K4me3"],
+    method="regress",         # or "divide" (legacy, needs a raw source_layer)
+    gamma_mode="shrink",      # per_marker | single | shrink | shrink_stability
+    protect_covariates=["IdU"],
+)
+```
+
+All settings land in `adata.uns["normalization"]` and in the run provenance log
+(`run_normalized` event), so a normalized run is reproducible from its own record.
+
 ## 9) Z-score normalization (balanced)
 
 ```python

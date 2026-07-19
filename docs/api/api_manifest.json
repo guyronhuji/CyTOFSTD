@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-13T17:50:25.138492+00:00",
+  "generated_at": "2026-07-19T05:17:38.575085+00:00",
   "generator": "scripts/generate_api_docs.py",
   "package": "cytofstandard",
   "module_count": 15,
@@ -573,6 +573,12 @@
               "decorators": []
             },
             {
+              "name": "cluster_dbscan",
+              "signature": "(self, embedding_name: str, cluster_key: str | None = None, eps: float = 0.5, min_samples: int = 5, metric: str = 'euclidean', verbose: bool = False, inplace: bool = True) -> dict[str, Any]",
+              "summary": "Cluster cells with DBSCAN on the coordinates of a stored embedding.",
+              "decorators": []
+            },
+            {
               "name": "cluster_leiden",
               "signature": "(self, embedding_name: str, cluster_key: str | None = None, resolution: float = 1.0, n_iterations: int = 2, beta: float = 0.01, objective_function: str = 'modularity', seed: int = 42, verbose: bool = False, inplace: bool = True) -> dict[str, Any]",
               "summary": "Cluster cells with Leiden using graph artifacts from an embedding.",
@@ -597,6 +603,12 @@
               "decorators": []
             },
             {
+              "name": "compute_marker_tech_correlations",
+              "signature": "(self, control_markers: list[str] | None = None, layer: str = 'raw', group_value: str | None = None, groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, use_stored_tech_factor: bool = False, module_name: str = 'cytof_transform')",
+              "summary": "Correlate every marker with the technical factor.",
+              "decorators": []
+            },
+            {
               "name": "compute_rmt_spectrum",
               "signature": "(self, markers = None, layer = None, groupby = None, matrix = 'marker_cov', standardize = True, n_cells = 10000, sigma_sq = None, random_state = 0, uns_key = 'rmt_spectrum', plot = False, inplace = True)",
               "summary": "Compute the marker eigenvalue spectrum and compare to the Marchenko-Pastur null.",
@@ -604,13 +616,13 @@
             },
             {
               "name": "compute_umap",
-              "signature": "(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, knn_method: str = 'brute', verbose: bool = False, module_name: str = 'mlx_umap', inplace: bool = True) -> dict[str, Any]",
-              "summary": "Compute UMAP embedding from selected markers using mlx-umap.",
+              "signature": "(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, subsample_size: int | None = 50000, chunk_size: int = 50000, verbose: bool = False, inplace: bool = True) -> dict[str, Any]",
+              "summary": "Compute UMAP embedding from selected markers using umap-learn.",
               "decorators": []
             },
             {
               "name": "compute_umap_balanced",
-              "signature": "(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', groupby_col: str = 'sample_id', n_per_group: int | None = None, replace: bool = False, n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, knn_method: str = 'brute', verbose: bool = False, module_name: str = 'mlx_umap', inplace: bool = True) -> dict[str, Any]",
+              "signature": "(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', groupby_col: str = 'sample_id', n_per_group: int | None = None, replace: bool = False, n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, chunk_size: int = 50000, verbose: bool = False, inplace: bool = True) -> dict[str, Any]",
               "summary": "Compute UMAP with fit on balanced subsample, then transform all cells.",
               "decorators": []
             },
@@ -624,6 +636,12 @@
               "name": "differential_abundance",
               "signature": "(self, cluster_key: str, groupby: str, comparisons: str | list[tuple[str, str]] | None = 'all', method: str = 'fisher', multitest: str | None = 'bh', order: list[str] | None = None, plot: bool = False, figsize: tuple[float, float] | None = None, ax = None) -> pd.DataFrame | tuple[pd.DataFrame, tuple]",
               "summary": "Test whether cluster proportions differ between groups.",
+              "decorators": []
+            },
+            {
+              "name": "evaluate_marker_intensity_regime",
+              "signature": "(self, candidate_markers: list[str], layer: str = 'raw', group_value: str | None = None, groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, med_thresh: float = 0.3, p90_thresh: float = 0.7, module_name: str = 'cytof_transform')",
+              "summary": "Flag markers too dim for permeability correction.",
               "decorators": []
             },
             {
@@ -670,7 +688,7 @@
             },
             {
               "name": "normalize_with_cytof_transform",
-              "signature": "(self, control_markers: list[str], markers_to_correct: list[str], source_layer: str = 'raw', corrected_layer: str = 'normalized', z_layer: str = 'normalized_z', groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, anchor_to_median: bool = True, zscore: bool = True, module_name: str = 'cytof_transform', inplace: bool = True) -> dict[str, Any]",
+              "signature": "(self, control_markers: list[str], markers_to_correct: list[str], source_layer: str = 'raw', corrected_layer: str = 'normalized', z_layer: str = 'normalized_z', groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, anchor_to_median: bool = True, zscore: bool = True, method: str = 'regress', gamma_mode: str = 'per_marker', shrink_target: str = 'control', protect_covariates: list[str] | None = None, stability_group_col: str | None = None, min_group_cells: int = 50, compartment_col: str | None = None, module_name: str = 'cytof_transform', inplace: bool = True) -> dict[str, Any]",
               "summary": "Normalize markers using external cytof_transform, per sample/line group.",
               "decorators": []
             },
@@ -726,6 +744,12 @@
               "name": "plot_normalization_tech_factor_qc",
               "signature": "(self, control_markers: list[str], layer: str = 'raw', group_value: str | None = None, groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, module_name: str = 'cytof_transform')",
               "summary": "Plot technical-factor QC using cytof_transform.plot_tech_factor_qc.",
+              "decorators": []
+            },
+            {
+              "name": "plot_normalization_umap_qc",
+              "signature": "(self, pre_layer: str = 'raw', post_layer: str = 'normalized', group_value: str | None = None, groupby_col: str = 'sample_id', input_pre_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, umap_markers: list[str] | None = None, bio_marker: str | None = None, control_histones: list[str] | None = None, n_neighbors: int = 30, min_dist: float = 0.3, random_state: int = 0, module_name: str = 'cytof_transform')",
+              "summary": "Compare pre/post normalization in a shared UMAP via cytof_transform.plot_umap_qc.",
               "decorators": []
             },
             {

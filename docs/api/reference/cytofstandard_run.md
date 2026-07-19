@@ -133,6 +133,27 @@ Raises:
     ValueError: Invalid parameter values or missing data.
     RunNotIngestedError: Run has not been ingested.
 
+##### `cluster_dbscan(self, embedding_name: str, cluster_key: str | None = None, eps: float = 0.5, min_samples: int = 5, metric: str = 'euclidean', verbose: bool = False, inplace: bool = True) -> dict[str, Any]`
+
+Cluster cells with DBSCAN on the coordinates of a stored embedding.
+
+Operates directly on adata.obsm[embedding_name] (e.g. 2-D UMAP coordinates).
+Noise points (DBSCAN label -1) are retained as the category ``"-1"``.
+Existing clusterings with the same key are overwritten.
+
+Args:
+    embedding_name: Key in adata.obsm to use as input coordinates.
+    cluster_key: Column name written to adata.obs. Defaults to
+        ``"{embedding_name}_dbscan"``.
+    eps: Maximum distance between two samples to be considered neighbours.
+    min_samples: Minimum neighbours for a point to be a core point.
+    metric: Distance metric passed to sklearn DBSCAN.
+    verbose: Print progress and result summary.
+    inplace: Persist to zarr immediately after clustering.
+
+Returns:
+    Metadata dict with parameters, timing, n_clusters, and n_noise.
+
 ##### `cluster_leiden(self, embedding_name: str, cluster_key: str | None = None, resolution: float = 1.0, n_iterations: int = 2, beta: float = 0.01, objective_function: str = 'modularity', seed: int = 42, verbose: bool = False, inplace: bool = True) -> dict[str, Any]`
 
 Cluster cells with Leiden using graph artifacts from an embedding.
@@ -231,6 +252,22 @@ Returns:
     Metadata dict with FlowSOM metadata stored under
     `adata.uns["clusterings"]["X_flowsom"]` and `adata.uns["flowsom"]`.
 
+##### `compute_marker_tech_correlations(self, control_markers: list[str] | None = None, layer: str = 'raw', group_value: str | None = None, groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, use_stored_tech_factor: bool = False, module_name: str = 'cytof_transform')`
+
+Correlate every marker with the technical factor.
+
+Wraps cytof_transform.compute_marker_tech_correlations.
+
+Args:
+    control_markers: Markers defining the technical factor. Required unless
+        use_stored_tech_factor is True.
+    use_stored_tech_factor: If True, use obs["norm_tech_factor"] from a
+        previous normalization instead of recomputing PC1.
+
+Returns:
+    Tuple of (corr, tech_factor): per-marker Pearson correlation with the
+    technical factor, and the technical factor itself (per cell).
+
 ##### `compute_rmt_spectrum(self, markers = None, layer = None, groupby = None, matrix = 'marker_cov', standardize = True, n_cells = 10000, sigma_sq = None, random_state = 0, uns_key = 'rmt_spectrum', plot = False, inplace = True)`
 
 Compute the marker eigenvalue spectrum and compare to the Marchenko-Pastur null.
@@ -274,23 +311,25 @@ Raises:
     ValueError: Invalid parameter values or missing data.
     RunNotIngestedError: Run has not been ingested.
 
-##### `compute_umap(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, knn_method: str = 'brute', verbose: bool = False, module_name: str = 'mlx_umap', inplace: bool = True) -> dict[str, Any]`
+##### `compute_umap(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, subsample_size: int | None = 50000, chunk_size: int = 50000, verbose: bool = False, inplace: bool = True) -> dict[str, Any]`
 
-Compute UMAP embedding from selected markers using mlx-umap.
+Compute UMAP embedding from selected markers using umap-learn.
 
-Also computes/stores KNN and graph artifacts required for downstream Leiden.
-Existing artifacts with the same `embedding_name` are overwritten.
+Fits on a random subsample of up to `subsample_size` cells, then
+transforms all cells in chunks of `chunk_size`. Set `subsample_size=None`
+to fit on the full dataset. Also computes/stores KNN and graph artifacts
+required for downstream Leiden. Existing artifacts with the same
+`embedding_name` are overwritten.
 
-##### `compute_umap_balanced(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', groupby_col: str = 'sample_id', n_per_group: int | None = None, replace: bool = False, n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, knn_method: str = 'brute', verbose: bool = False, module_name: str = 'mlx_umap', inplace: bool = True) -> dict[str, Any]`
+##### `compute_umap_balanced(self, markers: list[str], source_layer: str = 'X', embedding_name: str = 'X_umap', groupby_col: str = 'sample_id', n_per_group: int | None = None, replace: bool = False, n_neighbors: int = 15, n_components: int = 2, min_dist: float = 0.1, metric: str = 'euclidean', random_state: int = 42, chunk_size: int = 50000, verbose: bool = False, inplace: bool = True) -> dict[str, Any]`
 
 Compute UMAP with fit on balanced subsample, then transform all cells.
 
 The balanced subsample is defined by `groupby_col`, using `n_per_group`
 cells per group (or the smallest group size if None). The UMAP model
-is fit on the subsample, then used to transform all cells.
-
-KNN and graph artifacts are still computed for the full dataset to
-support downstream Leiden clustering.
+is fit on the subsample, then all cells are transformed in chunks of
+`chunk_size`. KNN and graph artifacts are computed on the full dataset
+to support downstream Leiden clustering.
 
 ##### `create_subset_run(self, new_run_id: str, sample_ids: list[str] | None = None, line_ids: list[str] | None = None, run_name: str | None = None, notes: str | None = None) -> 'Run'`
 
@@ -342,6 +381,17 @@ Returns:
 Raises:
     ValueError: If ``cluster_key`` or ``groupby`` are not in
         ``adata.obs``.
+
+##### `evaluate_marker_intensity_regime(self, candidate_markers: list[str], layer: str = 'raw', group_value: str | None = None, groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, med_thresh: float = 0.3, p90_thresh: float = 0.7, module_name: str = 'cytof_transform')`
+
+Flag markers too dim for permeability correction.
+
+Wraps cytof_transform.evaluate_marker_intensity_regime. Use this to choose
+`markers_to_correct` before calling normalize_with_cytof_transform.
+
+Returns:
+    DataFrame with per-marker median/p90 in arcsinh space and a
+    recommendation flag.
 
 ##### `gate_cell_cycle(self, marker_map: dict[str, str] | None = None, layer: str | None = None, thresholds: dict[str, float] | None = None, quantile_thresholds: dict[str, float] | None = None, threshold_methods: dict[str, str] | None = None, inplace: bool = True) -> dict[str, Any]`
 
@@ -516,7 +566,7 @@ Raises:
     ValueError: If either key is not in ``adata.obs``, or ``plot``/
         ``matrix`` are invalid values.
 
-##### `normalize_with_cytof_transform(self, control_markers: list[str], markers_to_correct: list[str], source_layer: str = 'raw', corrected_layer: str = 'normalized', z_layer: str = 'normalized_z', groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, anchor_to_median: bool = True, zscore: bool = True, module_name: str = 'cytof_transform', inplace: bool = True) -> dict[str, Any]`
+##### `normalize_with_cytof_transform(self, control_markers: list[str], markers_to_correct: list[str], source_layer: str = 'raw', corrected_layer: str = 'normalized', z_layer: str = 'normalized_z', groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, anchor_to_median: bool = True, zscore: bool = True, method: str = 'regress', gamma_mode: str = 'per_marker', shrink_target: str = 'control', protect_covariates: list[str] | None = None, stability_group_col: str | None = None, min_group_cells: int = 50, compartment_col: str | None = None, module_name: str = 'cytof_transform', inplace: bool = True) -> dict[str, Any]`
 
 Normalize markers using external cytof_transform, per sample/line group.
 
@@ -528,9 +578,24 @@ Args:
     z_layer: Output layer for z-scored corrected values.
     groupby_col: Obs column used for per-group normalization (e.g. sample_id/line_id).
     input_is_arcsinh: If True, source layer is already arcsinh-transformed.
+        Not allowed with method="divide", which needs raw counts.
     arcsinh_cofactor: Cofactor used when transforming source data with arcsinh.
     anchor_to_median: Passed to cytof_transform config.
     zscore: Passed to cytof_transform config.
+    method: "regress" for PC1 regression (Method A), or "divide" for the
+        legacy std-minimizing permeabilization division (Method B1). The
+        divide path consumes raw counts and arcsinh-transforms after
+        dividing, so the corrected layer is on the arcsinh scale either way.
+    gamma_mode: Slope pooling for method="regress" — "per_marker", "single",
+        "shrink", or "shrink_stability".
+    shrink_target: Target for "single"/"shrink" pooling — "control" or "global".
+    protect_covariates: Biological covariates to adjust for but keep (e.g.
+        ["IdU", "CyclinB1"]). Only those present in the data are used.
+    stability_group_col: Obs column of group labels for
+        gamma_mode="shrink_stability". Passed through as a data column.
+    min_group_cells: Minimum cells for a stability group to count.
+    compartment_col: Obs column of compartment labels. When set, each
+        sample group is normalized per compartment.
     module_name: Module name for importing cytof_transform.
     inplace: If True, persist updates to run zarr.
 
@@ -719,6 +784,10 @@ Plot marker-tech correlations pre/post normalization for a run or group.
 ##### `plot_normalization_tech_factor_qc(self, control_markers: list[str], layer: str = 'raw', group_value: str | None = None, groupby_col: str = 'sample_id', input_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, module_name: str = 'cytof_transform')`
 
 Plot technical-factor QC using cytof_transform.plot_tech_factor_qc.
+
+##### `plot_normalization_umap_qc(self, pre_layer: str = 'raw', post_layer: str = 'normalized', group_value: str | None = None, groupby_col: str = 'sample_id', input_pre_is_arcsinh: bool = False, arcsinh_cofactor: float = 5.0, umap_markers: list[str] | None = None, bio_marker: str | None = None, control_histones: list[str] | None = None, n_neighbors: int = 30, min_dist: float = 0.3, random_state: int = 0, module_name: str = 'cytof_transform')`
+
+Compare pre/post normalization in a shared UMAP via cytof_transform.plot_umap_qc.
 
 ##### `qc_gate(self, gates: dict[str, Any], layer: str = 'X', inplace: bool = True) -> pd.Series`
 

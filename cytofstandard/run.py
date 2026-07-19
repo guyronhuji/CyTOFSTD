@@ -5393,6 +5393,59 @@ class Run:
                 "Install or make it importable, then retry."
             ) from exc
 
+    @staticmethod
+    def _build_cytof_transform_config(module, requested: dict[str, Any]):
+        """Build a CytofTransformConfig, tolerating older cytof_transform versions.
+
+        Options the installed module does not accept are dropped, but only when
+        left at their default; explicitly requesting an unsupported option is an
+        error rather than a silent no-op.
+        """
+        config_cls = module.CytofTransformConfig
+        try:
+            supported = set(inspect.signature(config_cls).parameters)
+        except (TypeError, ValueError):
+            supported = set(requested)
+
+        unsupported = [
+            name
+            for name, (value, default) in requested.items()
+            if name not in supported and value != default
+        ]
+        if unsupported:
+            raise ValueError(
+                f"The installed cytof_transform module does not support "
+                f"{sorted(unsupported)}. Upgrade cytof_transform (>=0.2.0) or leave "
+                "these options at their defaults."
+            )
+
+        kwargs = {
+            name: value
+            for name, (value, _default) in requested.items()
+            if name in supported
+        }
+        return config_cls(**kwargs)
+
+    @staticmethod
+    def _dispatch_cytof_transform(module, data, cfg, compartments=None):
+        """Run one cytof_transform normalization, preferring the unified entry point.
+
+        cytof_transform >=0.2.0 exposes ``cytof_normalize``, which dispatches on
+        ``config.method``. Older versions are called directly and only support
+        the regression family.
+        """
+        if hasattr(module, "cytof_normalize"):
+            return module.cytof_normalize(data, cfg, compartments=compartments)
+
+        if getattr(cfg, "method", "regress") != "regress":
+            raise ValueError(
+                f"method='{cfg.method}' requires cytof_transform >=0.2.0 "
+                "(no cytof_normalize found in the installed module)."
+            )
+        if compartments is not None:
+            return module.cytof_transform_by_compartment(data, compartments, cfg)
+        return module.cytof_transform_global(data, cfg)
+
     def normalize_with_cytof_transform(
         self,
         control_markers: list[str],
@@ -5405,6 +5458,13 @@ class Run:
         arcsinh_cofactor: float = 5.0,
         anchor_to_median: bool = True,
         zscore: bool = True,
+        method: str = "regress",
+        gamma_mode: str = "per_marker",
+        shrink_target: str = "control",
+        protect_covariates: list[str] | None = None,
+        stability_group_col: str | None = None,
+        min_group_cells: int = 50,
+        compartment_col: str | None = None,
         module_name: str = "cytof_transform",
         inplace: bool = True,
     ) -> dict[str, Any]:
@@ -5418,9 +5478,24 @@ class Run:
             z_layer: Output layer for z-scored corrected values.
             groupby_col: Obs column used for per-group normalization (e.g. sample_id/line_id).
             input_is_arcsinh: If True, source layer is already arcsinh-transformed.
+                Not allowed with method="divide", which needs raw counts.
             arcsinh_cofactor: Cofactor used when transforming source data with arcsinh.
             anchor_to_median: Passed to cytof_transform config.
             zscore: Passed to cytof_transform config.
+            method: "regress" for PC1 regression (Method A), or "divide" for the
+                legacy std-minimizing permeabilization division (Method B1). The
+                divide path consumes raw counts and arcsinh-transforms after
+                dividing, so the corrected layer is on the arcsinh scale either way.
+            gamma_mode: Slope pooling for method="regress" — "per_marker", "single",
+                "shrink", or "shrink_stability".
+            shrink_target: Target for "single"/"shrink" pooling — "control" or "global".
+            protect_covariates: Biological covariates to adjust for but keep (e.g.
+                ["IdU", "CyclinB1"]). Only those present in the data are used.
+            stability_group_col: Obs column of group labels for
+                gamma_mode="shrink_stability". Passed through as a data column.
+            min_group_cells: Minimum cells for a stability group to count.
+            compartment_col: Obs column of compartment labels. When set, each
+                sample group is normalized per compartment.
             module_name: Module name for importing cytof_transform.
             inplace: If True, persist updates to run zarr.
 
@@ -5433,57 +5508,111 @@ class Run:
             raise ValueError("markers_to_correct cannot be empty")
         if arcsinh_cofactor <= 0:
             raise ValueError("arcsinh_cofactor must be > 0")
+        if method not in {"regress", "divide"}:
+            raise ValueError(
+                f"Unknown method '{method}'. Use 'regress' or 'divide'."
+            )
+        if method == "divide" and input_is_arcsinh:
+            raise ValueError(
+                "method='divide' is a multiplicative correction and needs raw "
+                "(linear, pre-arcsinh) counts, but input_is_arcsinh=True. Point "
+                "source_layer at a raw layer instead."
+            )
 
         adata = self.read_adata()
         module = self._load_cytof_transform_module(module_name)
 
         matrix = self._matrix_from_layer(adata, source_layer)
         var_names = adata.var_names.astype(str).tolist()
-        asinh_matrix = (
-            matrix if input_is_arcsinh else np.arcsinh(matrix / arcsinh_cofactor)
+        # "regress" works on the arcsinh scale; "divide" divides raw counts and
+        # arcsinh-transforms afterwards (raw -> divide -> arcsinh).
+        if method == "divide" or input_is_arcsinh:
+            input_matrix = matrix
+        else:
+            input_matrix = np.arcsinh(matrix / arcsinh_cofactor)
+        # float64 throughout: cytof_transform returns float64 and assigning it back
+        # into a float32 frame is deprecated in pandas. Layers are cast on write.
+        input_df = pd.DataFrame(
+            np.asarray(input_matrix, dtype=np.float64),
+            index=adata.obs_names,
+            columns=var_names,
         )
-        asinh_df = pd.DataFrame(asinh_matrix, index=adata.obs_names, columns=var_names)
 
-        missing_ctrl = [m for m in control_markers if m not in asinh_df.columns]
+        missing_ctrl = [m for m in control_markers if m not in input_df.columns]
         if missing_ctrl:
             raise ValueError(f"Control markers not found in data: {missing_ctrl}")
-        missing_norm = [m for m in markers_to_correct if m not in asinh_df.columns]
+        missing_norm = [m for m in markers_to_correct if m not in input_df.columns]
         if missing_norm:
             raise ValueError(f"markers_to_correct not found in data: {missing_norm}")
-        if groupby_col not in adata.obs.columns:
-            raise ValueError(
-                f"groupby_col '{groupby_col}' is missing from obs. "
-                f"Available columns: {adata.obs.columns.tolist()}"
-            )
+        for label, col in (
+            ("groupby_col", groupby_col),
+            ("compartment_col", compartment_col),
+            ("stability_group_col", stability_group_col),
+        ):
+            if col is not None and col not in adata.obs.columns:
+                raise ValueError(
+                    f"{label} '{col}' is missing from obs. "
+                    f"Available columns: {adata.obs.columns.tolist()}"
+                )
 
         groups = adata.obs[groupby_col].astype(str)
         unique_groups = sorted(groups.unique().tolist())
 
-        corrected_df = asinh_df.copy()
-        z_df = asinh_df.copy()
+        # cytof_transform reads the stability groups off a data column.
+        stability_col_name = None
+        if stability_group_col is not None:
+            stability_col_name = f"__stability__{stability_group_col}"
+            input_df[stability_col_name] = adata.obs[stability_group_col].astype(str).values
+
+        compartments = (
+            adata.obs[compartment_col].astype(str) if compartment_col else None
+        )
+
+        corrected_df = input_df.copy()
+        z_df = input_df.copy()
         tech_factor = pd.Series(np.nan, index=adata.obs_names, dtype=float)
         gamma_by_group: dict[str, dict[str, float]] = {}
         alpha_by_group: dict[str, dict[str, float]] = {}
+        gamma_shrink_by_group: dict[str, dict[str, Any]] = {}
 
         for group in unique_groups:
             idx = groups == group
-            group_df = asinh_df.loc[idx]
+            group_df = input_df.loc[idx]
             if group_df.shape[0] < 2:
                 raise ValueError(
                     f"Group '{group}' has only {group_df.shape[0]} cells; "
                     "at least 2 cells are required for normalization."
                 )
 
-            cfg = module.CytofTransformConfig(
-                control_markers=control_markers,
-                markers_to_correct=markers_to_correct,
-                use_compartments=False,
-                n_pcs_for_T=1,
-                anchor_to_median=anchor_to_median,
-                zscore=zscore,
-                line_col=None,
+            cfg = self._build_cytof_transform_config(
+                module,
+                {
+                    "control_markers": (control_markers, None),
+                    "markers_to_correct": (markers_to_correct, None),
+                    "use_compartments": (compartment_col is not None, False),
+                    "n_pcs_for_T": (1, 1),
+                    "anchor_to_median": (anchor_to_median, True),
+                    "zscore": (zscore, True),
+                    "line_col": (None, None),
+                    "method": (method, "regress"),
+                    "arcsinh_cofactor": (
+                        arcsinh_cofactor if method == "divide" else None,
+                        None,
+                    ),
+                    "gamma_mode": (gamma_mode, "per_marker"),
+                    "shrink_target": (shrink_target, "control"),
+                    "protect_covariates": (protect_covariates, None),
+                    "stability_group_col": (stability_col_name, None),
+                    "min_group_cells": (min_group_cells, 50),
+                },
             )
-            result = module.cytof_transform_global(group_df, cfg)
+
+            group_compartments = (
+                compartments.loc[group_df.index] if compartments is not None else None
+            )
+            result = self._dispatch_cytof_transform(
+                module, group_df, cfg, group_compartments
+            )
 
             corrected_df.loc[idx, :] = result.corrected.loc[group_df.index, :]
             z_df.loc[idx, :] = result.residuals_z.loc[group_df.index, :]
@@ -5493,8 +5622,20 @@ class Run:
             gamma_by_group[group] = {k: float(v) for k, v in result.gamma.items()}
             alpha_by_group[group] = {k: float(v) for k, v in result.alpha.items()}
 
-        adata.layers[corrected_layer] = corrected_df.values.astype(np.float32)
-        adata.layers[z_layer] = z_df.values.astype(np.float32)
+            shrink = getattr(result, "gamma_shrink", None)
+            if shrink is not None:
+                gamma_shrink_by_group[group] = {
+                    "table": json.loads(shrink.to_json(orient="index")),
+                    "attrs": {k: str(v) for k, v in dict(shrink.attrs).items()},
+                }
+
+        # Helper columns are inputs to cytof_transform, not marker outputs.
+        if stability_col_name is not None:
+            for frame in (corrected_df, z_df):
+                frame.drop(columns=[stability_col_name], inplace=True, errors="ignore")
+
+        adata.layers[corrected_layer] = corrected_df[var_names].values.astype(np.float32)
+        adata.layers[z_layer] = z_df[var_names].values.astype(np.float32)
         adata.obs["norm_tech_factor"] = tech_factor.values
 
         if "normalization" not in adata.uns or not isinstance(
@@ -5504,8 +5645,18 @@ class Run:
 
         summary = {
             "timestamp": datetime.utcnow().isoformat(),
-            "method": "cytof_transform_global",
+            "method": method,
+            "entry_point": (
+                "cytof_normalize"
+                if hasattr(module, "cytof_normalize")
+                else (
+                    "cytof_transform_by_compartment"
+                    if compartment_col
+                    else "cytof_transform_global"
+                )
+            ),
             "module": module_name,
+            "module_version": str(getattr(module, "__version__", "unknown")),
             "groupby_col": groupby_col,
             "groups": unique_groups,
             "source_layer": source_layer,
@@ -5517,10 +5668,23 @@ class Run:
             "markers_to_correct": list(markers_to_correct),
             "anchor_to_median": bool(anchor_to_median),
             "zscore": bool(zscore),
+            "gamma_mode": gamma_mode,
+            "shrink_target": shrink_target,
+            "protect_covariates": list(protect_covariates or []),
+            "stability_group_col": stability_group_col,
+            "min_group_cells": int(min_group_cells),
+            "compartment_col": compartment_col,
+            "compartments": (
+                sorted(compartments.unique().tolist()) if compartments is not None else []
+            ),
+            "tech_factor_kind": (
+                "permeabilization_factor" if method == "divide" else "pc1"
+            ),
             "n_before": int(adata.n_obs),
             "n_after": int(adata.n_obs),
             "gamma_by_group": gamma_by_group,
             "alpha_by_group": alpha_by_group,
+            "gamma_shrink_by_group": gamma_shrink_by_group,
         }
 
         history = adata.uns["normalization"].get("history", [])
@@ -5536,12 +5700,27 @@ class Run:
         self._log_run_event(
             "run_normalized",
             {
-                "method": "cytof_transform_global",
+                "method": method,
+                "entry_point": summary["entry_point"],
+                "module": module_name,
+                "module_version": summary["module_version"],
                 "groupby_col": groupby_col,
                 "groups": list(unique_groups),
                 "source_layer": source_layer,
                 "corrected_layer": corrected_layer,
                 "z_layer": z_layer,
+                "control_markers": list(control_markers),
+                "markers_to_correct": list(markers_to_correct),
+                "input_is_arcsinh": bool(input_is_arcsinh),
+                "arcsinh_cofactor": float(arcsinh_cofactor),
+                "anchor_to_median": bool(anchor_to_median),
+                "zscore": bool(zscore),
+                "gamma_mode": gamma_mode,
+                "shrink_target": shrink_target,
+                "protect_covariates": list(protect_covariates or []),
+                "stability_group_col": stability_group_col,
+                "min_group_cells": int(min_group_cells),
+                "compartment_col": compartment_col,
                 "n_cells": int(adata.n_obs),
                 "n_markers": int(adata.n_vars),
             },
@@ -5663,6 +5842,182 @@ class Run:
         return module.plot_gamma_qc(
             gamma=gamma_by_group[str(group_value)],
             marker_groups=marker_groups,
+        )
+
+    def _asinh_frame_for_qc(
+        self,
+        adata,
+        layer: str,
+        input_is_arcsinh: bool,
+        arcsinh_cofactor: float,
+        group_value: str | None = None,
+        groupby_col: str = "sample_id",
+    ) -> pd.DataFrame:
+        """Build an arcsinh-space cells x markers frame, optionally for one group."""
+        matrix = self._matrix_from_layer(adata, layer)
+        var_names = adata.var_names.astype(str).tolist()
+        values = matrix if input_is_arcsinh else np.arcsinh(matrix / arcsinh_cofactor)
+        frame = pd.DataFrame(
+            np.asarray(values, dtype=np.float64),
+            index=adata.obs_names,
+            columns=var_names,
+        )
+
+        if group_value is not None:
+            if groupby_col not in adata.obs.columns:
+                raise ValueError(
+                    f"groupby_col '{groupby_col}' is missing from obs. "
+                    f"Available columns: {adata.obs.columns.tolist()}"
+                )
+            frame = frame.loc[adata.obs[groupby_col].astype(str) == str(group_value)]
+            if frame.empty:
+                raise ValueError(
+                    f"No cells found where {groupby_col} == '{group_value}'."
+                )
+        return frame
+
+    def evaluate_marker_intensity_regime(
+        self,
+        candidate_markers: list[str],
+        layer: str = "raw",
+        group_value: str | None = None,
+        groupby_col: str = "sample_id",
+        input_is_arcsinh: bool = False,
+        arcsinh_cofactor: float = 5.0,
+        med_thresh: float = 0.3,
+        p90_thresh: float = 0.7,
+        module_name: str = "cytof_transform",
+    ):
+        """Flag markers too dim for permeability correction.
+
+        Wraps cytof_transform.evaluate_marker_intensity_regime. Use this to choose
+        `markers_to_correct` before calling normalize_with_cytof_transform.
+
+        Returns:
+            DataFrame with per-marker median/p90 in arcsinh space and a
+            recommendation flag.
+        """
+        adata = self.read_adata()
+        module = self._load_cytof_transform_module(module_name)
+
+        asinh_df = self._asinh_frame_for_qc(
+            adata, layer, input_is_arcsinh, arcsinh_cofactor, group_value, groupby_col
+        )
+        missing = [m for m in candidate_markers if m not in asinh_df.columns]
+        if missing:
+            raise ValueError(f"candidate_markers not found in data: {missing}")
+
+        return module.evaluate_marker_intensity_regime(
+            asinh_data=asinh_df,
+            candidate_markers=candidate_markers,
+            med_thresh=med_thresh,
+            p90_thresh=p90_thresh,
+        )
+
+    def compute_marker_tech_correlations(
+        self,
+        control_markers: list[str] | None = None,
+        layer: str = "raw",
+        group_value: str | None = None,
+        groupby_col: str = "sample_id",
+        input_is_arcsinh: bool = False,
+        arcsinh_cofactor: float = 5.0,
+        use_stored_tech_factor: bool = False,
+        module_name: str = "cytof_transform",
+    ):
+        """Correlate every marker with the technical factor.
+
+        Wraps cytof_transform.compute_marker_tech_correlations.
+
+        Args:
+            control_markers: Markers defining the technical factor. Required unless
+                use_stored_tech_factor is True.
+            use_stored_tech_factor: If True, use obs["norm_tech_factor"] from a
+                previous normalization instead of recomputing PC1.
+
+        Returns:
+            Tuple of (corr, tech_factor): per-marker Pearson correlation with the
+            technical factor, and the technical factor itself (per cell).
+        """
+        adata = self.read_adata()
+        module = self._load_cytof_transform_module(module_name)
+
+        asinh_df = self._asinh_frame_for_qc(
+            adata, layer, input_is_arcsinh, arcsinh_cofactor, group_value, groupby_col
+        )
+
+        tech_factor = None
+        if use_stored_tech_factor:
+            if "norm_tech_factor" not in adata.obs.columns:
+                raise ValueError(
+                    "norm_tech_factor not found in obs. Run "
+                    "normalize_with_cytof_transform first, or pass control_markers."
+                )
+            tech_factor = adata.obs["norm_tech_factor"].astype(float).loc[asinh_df.index]
+        elif not control_markers:
+            raise ValueError(
+                "control_markers is required unless use_stored_tech_factor=True."
+            )
+        else:
+            missing = [m for m in control_markers if m not in asinh_df.columns]
+            if missing:
+                raise ValueError(f"Control markers not found in data: {missing}")
+
+        return module.compute_marker_tech_correlations(
+            data=asinh_df,
+            tech_factor=tech_factor,
+            control_markers=None if use_stored_tech_factor else control_markers,
+        )
+
+    def plot_normalization_umap_qc(
+        self,
+        pre_layer: str = "raw",
+        post_layer: str = "normalized",
+        group_value: str | None = None,
+        groupby_col: str = "sample_id",
+        input_pre_is_arcsinh: bool = False,
+        arcsinh_cofactor: float = 5.0,
+        umap_markers: list[str] | None = None,
+        bio_marker: str | None = None,
+        control_histones: list[str] | None = None,
+        n_neighbors: int = 30,
+        min_dist: float = 0.3,
+        random_state: int = 0,
+        module_name: str = "cytof_transform",
+    ):
+        """Compare pre/post normalization in a shared UMAP via cytof_transform.plot_umap_qc."""
+        adata = self.read_adata()
+        module = self._load_cytof_transform_module(module_name)
+
+        if "norm_tech_factor" not in adata.obs.columns:
+            raise ValueError(
+                "norm_tech_factor not found in obs. Run normalize_with_cytof_transform first."
+            )
+
+        pre_df = self._asinh_frame_for_qc(
+            adata,
+            pre_layer,
+            input_pre_is_arcsinh,
+            arcsinh_cofactor,
+            group_value,
+            groupby_col,
+        )
+        # The post layer is already on the arcsinh scale.
+        post_df = self._asinh_frame_for_qc(
+            adata, post_layer, True, arcsinh_cofactor, group_value, groupby_col
+        )
+        tech_factor = adata.obs["norm_tech_factor"].astype(float).loc[pre_df.index]
+
+        return module.plot_umap_qc(
+            asinh_pre=pre_df,
+            asinh_post=post_df,
+            tech_factor=tech_factor,
+            umap_markers=umap_markers,
+            bio_marker=bio_marker,
+            control_histones=control_histones,
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            random_state=random_state,
         )
 
     @staticmethod

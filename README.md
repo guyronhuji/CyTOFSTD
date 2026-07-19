@@ -62,7 +62,7 @@ run.unlock_zarr_parts()
 
 ## Normalization (cytof_transform)
 
-Normalization calls the external `cytof_transform` module (it is not vendored into this package).
+Normalization calls the external `cytof_transform` module (it is not vendored into this package). Options below marked *(0.2.0+)* require `cytof_transform >= 0.2.0`.
 
 ```python
 summary = run.normalize_with_cytof_transform(
@@ -76,6 +76,63 @@ summary = run.normalize_with_cytof_transform(
 
 adata = run.read_adata()
 print(adata.layers.keys())  # includes 'normalized', 'normalized_z'
+```
+
+### Choosing a normalization family *(0.2.0+)*
+
+`method` selects the family. Both write the corrected layer on the arcsinh scale.
+
+| `method` | What it does | Input |
+| --- | --- | --- |
+| `"regress"` (default) | sctransform-inspired PC1 regression | arcsinh |
+| `"divide"` | legacy std-minimizing permeabilization division | raw counts |
+
+`"divide"` is a multiplicative correction, so it must see raw counts: point
+`source_layer` at a raw layer and leave `input_is_arcsinh=False`. The wrapper
+divides first and arcsinh-transforms after (`raw -> divide -> arcsinh`).
+
+```python
+summary = run.normalize_with_cytof_transform(
+    control_markers=["H3.3", "H3", "H4"],
+    markers_to_correct=["H3K27ac", "H3K4me3"],
+    method="divide",
+    source_layer="raw",
+)
+```
+
+### Regression options *(0.2.0+)*
+
+```python
+summary = run.normalize_with_cytof_transform(
+    control_markers=["H3.3", "H3", "H4"],
+    markers_to_correct=["H3K27ac", "H3K4me3"],
+    gamma_mode="shrink",           # per_marker | single | shrink | shrink_stability
+    shrink_target="control",       # control | global
+    protect_covariates=["IdU", "CyclinB1"],   # adjusted for, but kept
+    stability_group_col="condition",          # for gamma_mode="shrink_stability"
+    min_group_cells=50,
+    compartment_col="compartment",            # normalize within each compartment
+)
+```
+
+Every parameter above is recorded in two places: `adata.uns["normalization"]`
+(`latest`, plus an append-only `history`) and the run's provenance log at
+`runs/<run_id>/logs/provenance.jsonl` under the `run_normalized` event. When
+`gamma_mode` pools slopes, the per-marker shrinkage diagnostics are kept in
+`summary["gamma_shrink_by_group"]`.
+
+### Picking markers to correct
+
+```python
+# Which markers are bright enough to correct?
+regime = run.evaluate_marker_intensity_regime(
+    candidate_markers=["H3K27ac", "H3K4me3", "ER"],
+)
+
+# How strongly does each marker track the technical factor?
+corr, tech_factor = run.compute_marker_tech_correlations(
+    control_markers=["H3.3", "H3", "H4"],
+)
 ```
 
 QC plotting wrappers for normalization:
